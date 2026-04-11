@@ -10,7 +10,7 @@ keywords = ["cli", "uniq", "xxhash", "dedup"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-getargs = "0.5.0"
+clap = { version = "4.6.0", features = ["derive"] }
 hashbrown = "0.17.0"
 libc = "0.2.184"
 memchr = "2.8.0"
