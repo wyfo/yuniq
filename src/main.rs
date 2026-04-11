@@ -1,16 +1,16 @@
 use std::{
     env::args,
-    io::{self, ErrorKind, Write},
+    io::{self, Write},
 };
 
 use getargs::{Opt, Options};
 use hashbrown::HashSet;
-use libc;
 use memchr::memchr;
 use memmap2::MmapOptions;
 use twox_hash::XxHash3_128;
 
-const DEFAULT_CAPACITY: usize = 1_000_000;
+const DEFAULT_CAPACITY: usize = 1024 * 1024;
+const READ_BUF_SIZE: usize = 64 * 1024;
 
 fn print_help() {
     eprintln!(
@@ -23,19 +23,50 @@ Superfast line deduplicator
     );
 }
 
-#[inline]
-fn trim_newline(buf: &[u8]) -> &[u8] {
-    let mut end = buf.len();
-    if end > 0 && buf[end - 1] == b'\n' {
-        end -= 1;
+fn write_all(mut slice: &[u8]) -> io::Result<()> {
+    while !slice.is_empty() {
+        let n = unsafe { libc::write(libc::STDOUT_FILENO, slice.as_ptr().cast(), slice.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        slice = &slice[n as usize..];
     }
-    if end > 0 && buf[end - 1] == b'\r' {
-        end -= 1;
-    }
-    &buf[..end]
+    Ok(())
 }
 
-fn main() {
+fn read(buf: &mut [u8]) -> io::Result<usize> {
+    let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n as usize)
+}
+
+struct Deduplicator {
+    seen: HashSet<u128>,
+}
+
+impl Deduplicator {
+    fn new(capacity: usize) -> Self {
+        Self {
+            seen: HashSet::with_capacity(capacity),
+        }
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn is_duplicate(&mut self, line: &[u8]) -> bool {
+        let mut end = line.len();
+        if end > 0 && line[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > 0 && line[end - 1] == b'\r' {
+            end -= 1;
+        }
+        !self.seen.insert(XxHash3_128::oneshot(&line[..end]))
+    }
+}
+
+fn main() -> io::Result<()> {
     let args: Vec<String> = args().skip(1).collect();
     let mut capacity = DEFAULT_CAPACITY;
 
@@ -45,7 +76,7 @@ fn main() {
         match opt {
             Opt::Short('h') | Opt::Long("help") => {
                 print_help();
-                return;
+                return Ok(());
             }
             Opt::Short('c') | Opt::Long("capacity") => {
                 let val = opts.value().expect("capacity requires a value");
@@ -54,7 +85,7 @@ fn main() {
             _ => {
                 eprintln!("Unknown option: {:?}", opt);
                 print_help();
-                return;
+                return Ok(());
             }
         }
     }
@@ -63,7 +94,7 @@ fn main() {
     let reader = stdin.lock();
     let stdout_raw = io::stdout();
 
-    let mut seen = HashSet::with_capacity(capacity);
+    let mut dedup = Deduplicator::new(capacity);
 
     match unsafe { MmapOptions::new().map(&reader) } {
         Ok(mmap) => {
@@ -71,88 +102,33 @@ fn main() {
             let mut pos = 0;
             let mut write_start = 0;
 
-            let write_raw = |slice: &[u8]| -> bool {
-                let mut written = 0;
-                while written < slice.len() {
-                    let n = unsafe {
-                        libc::write(
-                            libc::STDOUT_FILENO,
-                            slice[written..].as_ptr() as *const libc::c_void,
-                            slice.len() - written,
-                        )
-                    };
-                    if n < 0 {
-                        let e = io::Error::last_os_error();
-                        if e.kind() != ErrorKind::BrokenPipe {
-                            eprintln!("xuniq: {e}");
-                        }
-                        return false;
-                    }
-                    written += n as usize;
-                }
-                true
-            };
-
             while pos < data.len() {
-                let next = memchr(b'\n', &data[pos..])
-                    .map(|i| pos + i + 1)
-                    .unwrap_or(data.len());
-                let hash = XxHash3_128::oneshot(trim_newline(&data[pos..next]));
-                if !seen.insert(hash) {
-                    // duplicate: flush the accumulated unique run before this line
-                    if write_start < pos && !write_raw(&data[write_start..pos]) {
-                        return;
-                    }
+                let next = memchr(b'\n', &data[pos..]).map_or(data.len(), |i| pos + i + 1);
+                if dedup.is_duplicate(&data[pos..next]) {
+                    write_all(&data[write_start..pos])?;
                     write_start = next;
                 }
                 pos = next;
             }
             if write_start < data.len() {
-                write_raw(&data[write_start..]);
+                write_all(&data[write_start..])?;
             }
         }
         Err(_) => {
             let mut stdout = io::BufWriter::new(stdout_raw.lock());
 
-            let mut process_line = |raw: &[u8]| -> bool {
-                let hash = XxHash3_128::oneshot(trim_newline(raw));
-                if seen.insert(hash)
-                    && let Err(e) = stdout.write_all(raw)
-                {
-                    if e.kind() != ErrorKind::BrokenPipe {
-                        eprintln!("xuniq: {e}");
-                    }
-                    return false;
-                }
-                true
-            };
-
-            const BUF_SIZE: usize = 64 * 1024;
-            let mut buf = vec![0u8; BUF_SIZE];
+            let mut buf = vec![0u8; READ_BUF_SIZE];
             let mut leftover = 0usize;
 
-            loop {
-                let n = unsafe {
-                    libc::read(
-                        libc::STDIN_FILENO,
-                        buf[leftover..].as_mut_ptr() as *mut libc::c_void,
-                        buf.len() - leftover,
-                    )
-                };
-                if n < 0 {
-                    eprintln!("xuniq: read error");
-                    break;
-                } else if n == 0 {
-                    if leftover > 0 {
-                        process_line(&buf[..leftover]);
-                    }
-                    break;
-                }
-                let filled = leftover + n as usize;
+            while let n = read(&mut buf[leftover..])?
+                && n > 0
+            {
+                let filled = leftover + n;
                 let mut pos = 0;
                 while let Some(i) = memchr(b'\n', &buf[pos..filled]) {
-                    if !process_line(&buf[pos..pos + i + 1]) {
-                        return;
+                    let line = &buf[pos..pos + i + 1];
+                    if !dedup.is_duplicate(line) {
+                        stdout.write_all(line)?;
                     }
                     pos += i + 1;
                 }
@@ -162,6 +138,11 @@ fn main() {
                     buf.resize(buf.len() * 2, 0);
                 }
             }
+            if leftover > 0 && !dedup.is_duplicate(&buf[..leftover]) {
+                stdout.write_all(&buf[..leftover])?;
+            }
         }
     }
+
+    Ok(())
 }
