@@ -6,11 +6,14 @@ use memchr::memchr;
 use memmap2::MmapOptions;
 use twox_hash::XxHash3_128;
 
+#[cfg(test)]
+mod tests;
+
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
 const READ_BUF_SIZE: usize = 64 * 1024;
 
 #[derive(Parser)]
-#[command(about = "Superfast line deduplicator")]
+#[command(about = "Hyperfast line deduplicator")]
 struct Args {
     /// Expected number of lines
     #[arg(short, long, default_value_t = DEFAULT_CAPACITY)]
@@ -105,8 +108,8 @@ fn process_stream(mut dedup: Deduplicator) -> io::Result<()> {
             buf.resize(buf.len() * 2, 0);
         }
     }
-    if leftover > 0 {
-        process_chunk(&buf[..leftover], &mut dedup, true, write_all)?;
+    if leftover > 0 && !dedup.is_duplicate(&buf[..leftover]) {
+        write_all(&buf[..leftover])?;
     }
     Ok(())
 }

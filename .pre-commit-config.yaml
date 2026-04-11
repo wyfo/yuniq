@@ -1,8 +1,30 @@
 repos:
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.40.0
+    hooks:
+      - id: typos
   - repo: local
     hooks:
-      - id: yuniq-tests
-        name: yuniq tests
+      - id: fmt
+        name: fmt
+        entry: cargo fmt -- --config "unstable_features=true,imports_granularity=Crate,group_imports=StdExternalCrate,format_code_in_doc_comments=true"
+        language: rust
+        pass_filenames: false
+        types_or: [rust, toml]
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --all-targets -- -D warnings
+        language: rust
+        pass_filenames: false
+        types_or: [rust, toml]
+      - id: unit-tests
+        name: unit tests
+        entry: cargo test
+        language: rust
+        pass_filenames: false
+        types_or: [rust, toml]
+      - id: integration-tests
+        name: integration tests
         entry: python3 test.py
         language: system
         pass_filenames: false
