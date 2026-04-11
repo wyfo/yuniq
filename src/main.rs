@@ -61,38 +61,72 @@ fn main() {
 
     let stdin = io::stdin();
     let reader = stdin.lock();
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    let stdout_raw = io::stdout();
 
     let mut seen = HashSet::with_capacity(capacity);
-
-    let mut process_line = |raw: &[u8]| -> bool {
-        let hash = XxHash3_128::oneshot(trim_newline(raw));
-        if seen.insert(hash)
-            && let Err(e) = stdout.write_all(raw)
-        {
-            if e.kind() != ErrorKind::BrokenPipe {
-                eprintln!("xuniq: {e}");
-            }
-            return false;
-        }
-        true
-    };
 
     match unsafe { MmapOptions::new().map(&reader) } {
         Ok(mmap) => {
             let data: &[u8] = &mmap;
             let mut pos = 0;
+            let mut write_start = 0;
+
+            let write_raw = |slice: &[u8]| -> bool {
+                let mut written = 0;
+                while written < slice.len() {
+                    let n = unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            slice[written..].as_ptr() as *const libc::c_void,
+                            slice.len() - written,
+                        )
+                    };
+                    if n < 0 {
+                        let e = io::Error::last_os_error();
+                        if e.kind() != ErrorKind::BrokenPipe {
+                            eprintln!("xuniq: {e}");
+                        }
+                        return false;
+                    }
+                    written += n as usize;
+                }
+                true
+            };
+
             while pos < data.len() {
                 let next = memchr(b'\n', &data[pos..])
                     .map(|i| pos + i + 1)
                     .unwrap_or(data.len());
-                if !process_line(&data[pos..next]) {
-                    break;
+                let hash = XxHash3_128::oneshot(trim_newline(&data[pos..next]));
+                if !seen.insert(hash) {
+                    // duplicate: flush the accumulated unique run before this line
+                    if write_start < pos && !write_raw(&data[write_start..pos]) {
+                        return;
+                    }
+                    write_start = next;
                 }
                 pos = next;
             }
+            if write_start < data.len() {
+                write_raw(&data[write_start..]);
+            }
         }
         Err(_) => {
+            let mut stdout = io::BufWriter::new(stdout_raw.lock());
+
+            let mut process_line = |raw: &[u8]| -> bool {
+                let hash = XxHash3_128::oneshot(trim_newline(raw));
+                if seen.insert(hash)
+                    && let Err(e) = stdout.write_all(raw)
+                {
+                    if e.kind() != ErrorKind::BrokenPipe {
+                        eprintln!("xuniq: {e}");
+                    }
+                    return false;
+                }
+                true
+            };
+
             const BUF_SIZE: usize = 64 * 1024;
             let mut buf = vec![0u8; BUF_SIZE];
             let mut leftover = 0usize;
