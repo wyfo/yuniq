@@ -62,13 +62,18 @@ impl Deduplicator {
     }
 }
 
-fn process_chunk(data: &[u8], dedup: &mut Deduplicator, is_final: bool) -> io::Result<usize> {
+fn process_chunk(
+    data: &[u8],
+    dedup: &mut Deduplicator,
+    is_final: bool,
+    mut write: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<usize> {
     let mut pos = 0;
     let mut write_start = 0;
     while let Some(i) = memchr(b'\n', &data[pos..]) {
         let next = pos + i + 1;
         if dedup.is_duplicate(&data[pos..next]) {
-            write_all(&data[write_start..pos])?;
+            write(&data[write_start..pos])?;
             write_start = next;
         }
         pos = next;
@@ -78,12 +83,12 @@ fn process_chunk(data: &[u8], dedup: &mut Deduplicator, is_final: bool) -> io::R
     } else {
         pos
     };
-    write_all(&data[write_start..end])?;
+    write(&data[write_start..end])?;
     Ok(data.len() - end)
 }
 
 fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
-    process_chunk(data, &mut dedup, true)?;
+    process_chunk(data, &mut dedup, true, write_all)?;
     Ok(())
 }
 
@@ -94,14 +99,14 @@ fn process_stream(mut dedup: Deduplicator) -> io::Result<()> {
         && n > 0
     {
         let filled = leftover + n;
-        leftover = process_chunk(&buf[..filled], &mut dedup, false)?;
+        leftover = process_chunk(&buf[..filled], &mut dedup, false, write_all)?;
         buf.copy_within(filled - leftover..filled, 0);
         if leftover == buf.len() {
             buf.resize(buf.len() * 2, 0);
         }
     }
     if leftover > 0 {
-        process_chunk(&buf[..leftover], &mut dedup, true)?;
+        process_chunk(&buf[..leftover], &mut dedup, true, write_all)?;
     }
     Ok(())
 }
