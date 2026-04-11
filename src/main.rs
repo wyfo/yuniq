@@ -73,21 +73,19 @@ fn process_chunk(
 ) -> io::Result<usize> {
     let mut pos = 0;
     let mut write_start = 0;
-    while let Some(i) = memchr(b'\n', &data[pos..]) {
-        let next = pos + i + 1;
+    while pos < data.len()
+        && let Some(next) = memchr(b'\n', &data[pos..])
+            .map(|i| pos + i + 1)
+            .or_else(|| is_final.then_some(data.len()))
+    {
         if dedup.is_duplicate(&data[pos..next]) {
             write(&data[write_start..pos])?;
             write_start = next;
         }
         pos = next;
     }
-    let end = if is_final && pos < data.len() && !dedup.is_duplicate(&data[pos..]) {
-        data.len()
-    } else {
-        pos
-    };
-    write(&data[write_start..end])?;
-    Ok(data.len() - end)
+    write(&data[write_start..pos])?;
+    Ok(data.len() - pos)
 }
 
 fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {

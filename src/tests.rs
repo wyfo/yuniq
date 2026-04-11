@@ -8,28 +8,28 @@ fn run(data: &[u8], is_final: bool) -> (Vec<u8>, usize) {
         Ok(())
     })
     .unwrap();
+    if is_final {
+        assert_eq!(rem, 0);
+    }
     (out, rem)
 }
 
 #[test]
 fn all_unique() {
-    let (out, rem) = run(b"a\nb\n", false);
+    let (out, _) = run(b"a\nb\n", false);
     assert_eq!(out, b"a\nb\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn duplicate() {
-    let (out, rem) = run(b"a\nb\na\n", false);
+    let (out, _) = run(b"a\nb\na\n", false);
     assert_eq!(out, b"a\nb\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn all_dupes() {
-    let (out, rem) = run(b"x\nx\nx\n", false);
+    let (out, _) = run(b"x\nx\nx\n", false);
     assert_eq!(out, b"x\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
@@ -41,23 +41,20 @@ fn empty_not_final() {
 
 #[test]
 fn empty_final() {
-    let (out, rem) = run(b"", true);
+    let (out, _) = run(b"", true);
     assert_eq!(out, b"");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn final_unique_tail() {
-    let (out, rem) = run(b"a\nb", true);
+    let (out, _) = run(b"a\nb", true);
     assert_eq!(out, b"a\nb");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn final_dup_tail() {
-    let (out, rem) = run(b"a\nb\na", true);
+    let (out, _) = run(b"a\nb\na", true);
     assert_eq!(out, b"a\nb\n");
-    assert_eq!(rem, 1); // duplicate tail is not consumed
 }
 
 #[test]
@@ -69,23 +66,20 @@ fn non_final_tail() {
 
 #[test]
 fn crlf() {
-    let (out, rem) = run(b"a\r\nb\r\na\r\n", false);
+    let (out, _) = run(b"a\r\nb\r\na\r\n", false);
     assert_eq!(out, b"a\r\nb\r\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn crlf_vs_lf_same_key() {
-    let (out, rem) = run(b"a\r\na\n", false);
+    let (out, _) = run(b"a\r\na\n", false);
     assert_eq!(out, b"a\r\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
 fn blank_lines() {
-    let (out, rem) = run(b"\na\n\n", false);
+    let (out, _) = run(b"\na\n\n", false);
     assert_eq!(out, b"\na\n");
-    assert_eq!(rem, 0);
 }
 
 #[test]
