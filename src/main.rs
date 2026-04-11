@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io;
 
 use clap::Parser;
 use hashbrown::HashSet;
@@ -62,44 +62,46 @@ impl Deduplicator {
     }
 }
 
-fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
+fn process_chunk(data: &[u8], dedup: &mut Deduplicator, is_final: bool) -> io::Result<usize> {
     let mut pos = 0;
     let mut write_start = 0;
-    while pos < data.len() {
-        let next = memchr(b'\n', &data[pos..]).map_or(data.len(), |i| pos + i + 1);
+    while let Some(i) = memchr(b'\n', &data[pos..]) {
+        let next = pos + i + 1;
         if dedup.is_duplicate(&data[pos..next]) {
             write_all(&data[write_start..pos])?;
             write_start = next;
         }
         pos = next;
     }
-    write_all(&data[write_start..])
+    let end = if is_final && pos < data.len() && !dedup.is_duplicate(&data[pos..]) {
+        data.len()
+    } else {
+        pos
+    };
+    write_all(&data[write_start..end])?;
+    Ok(data.len() - end)
+}
+
+fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
+    process_chunk(data, &mut dedup, true)?;
+    Ok(())
 }
 
 fn process_stream(mut dedup: Deduplicator) -> io::Result<()> {
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
     let mut buf = vec![0u8; READ_BUF_SIZE];
     let mut leftover = 0usize;
     while let n = read(&mut buf[leftover..])?
         && n > 0
     {
         let filled = leftover + n;
-        let mut pos = 0;
-        while let Some(i) = memchr(b'\n', &buf[pos..filled]) {
-            let line = &buf[pos..pos + i + 1];
-            if !dedup.is_duplicate(line) {
-                stdout.write_all(line)?;
-            }
-            pos += i + 1;
-        }
-        leftover = filled - pos;
-        buf.copy_within(pos..filled, 0);
+        leftover = process_chunk(&buf[..filled], &mut dedup, false)?;
+        buf.copy_within(filled - leftover..filled, 0);
         if leftover == buf.len() {
             buf.resize(buf.len() * 2, 0);
         }
     }
-    if leftover > 0 && !dedup.is_duplicate(&buf[..leftover]) {
-        stdout.write_all(&buf[..leftover])?;
+    if leftover > 0 {
+        process_chunk(&buf[..leftover], &mut dedup, true)?;
     }
     Ok(())
 }
