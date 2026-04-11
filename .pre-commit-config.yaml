@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: yuniq-tests
+        name: yuniq tests
+        entry: python3 test.py
+        language: system
+        pass_filenames: false
+        always_run: true
