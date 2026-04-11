@@ -1,10 +1,11 @@
 use std::{
     env::args,
-    io::{self, BufRead, ErrorKind, Write},
+    io::{self, ErrorKind, Write},
 };
 
 use getargs::{Opt, Options};
 use hashbrown::HashSet;
+use libc;
 use memchr::memchr;
 use memmap2::MmapOptions;
 use twox_hash::XxHash3_128;
@@ -59,7 +60,7 @@ fn main() {
     }
 
     let stdin = io::stdin();
-    let mut reader = stdin.lock();
+    let reader = stdin.lock();
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
     let mut seen = HashSet::with_capacity(capacity);
@@ -92,15 +93,40 @@ fn main() {
             }
         }
         Err(_) => {
-            let mut buf = Vec::with_capacity(1024);
-            while let Ok(n) = reader.read_until(b'\n', &mut buf) {
-                if n == 0 {
+            const BUF_SIZE: usize = 64 * 1024;
+            let mut buf = vec![0u8; BUF_SIZE];
+            let mut leftover = 0usize;
+
+            loop {
+                let n = unsafe {
+                    libc::read(
+                        libc::STDIN_FILENO,
+                        buf[leftover..].as_mut_ptr() as *mut libc::c_void,
+                        buf.len() - leftover,
+                    )
+                };
+                if n < 0 {
+                    eprintln!("xuniq: read error");
+                    break;
+                } else if n == 0 {
+                    if leftover > 0 {
+                        process_line(&buf[..leftover]);
+                    }
                     break;
                 }
-                if !process_line(&buf) {
-                    break;
+                let filled = leftover + n as usize;
+                let mut pos = 0;
+                while let Some(i) = memchr(b'\n', &buf[pos..filled]) {
+                    if !process_line(&buf[pos..pos + i + 1]) {
+                        return;
+                    }
+                    pos += i + 1;
                 }
-                buf.clear();
+                leftover = filled - pos;
+                buf.copy_within(pos..filled, 0);
+                if leftover == buf.len() {
+                    buf.resize(buf.len() * 2, 0);
+                }
             }
         }
     }
