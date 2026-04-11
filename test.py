@@ -6,48 +6,38 @@ that mirrors the Rust dedup logic exactly.
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 
-BINARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "target", "debug", "yuniq")
+BINARY = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "target", "debug", "yuniq"
+)
 BUF_SIZE = 64 * 1024  # must match const BUF_SIZE in main.rs
 
 
 # ---------------------------------------------------------------------------
-# Oracle — mirrors the Rust logic exactly
+# Oracle
 # ---------------------------------------------------------------------------
 
-def _trim_newline(b: bytes) -> bytes:
-    """Mirrors trim_newline() in main.rs: strip \\n then optionally \\r."""
-    if b and b[-1:] == b'\n':
-        b = b[:-1]
-    if b and b[-1:] == b'\r':
-        b = b[:-1]
-    return b
 
-
-def yuniq_oracle(data: bytes) -> bytes:
+def oracle(data: bytes) -> bytearray:
     """Python reference implementation of yuniq."""
     seen: set[bytes] = set()
-    out: list[bytes] = []
-    pos = 0
-    while pos < len(data):
-        nl = data.find(b'\n', pos)
-        end = nl + 1 if nl != -1 else len(data)
-        line = data[pos:end]
-        key = _trim_newline(line)
-        if key not in seen:
-            seen.add(key)
-            out.append(line)
-        pos = end
-    return b''.join(out)
+    out = bytearray()
+    for m in re.finditer(rb"(?P<line>(?P<key>.*?)(\r\n|\n|$))", data):
+        if m["key"] not in seen:
+            seen.add(m["key"])
+            out.extend(m["line"])
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Execution helpers
 # ---------------------------------------------------------------------------
+
 
 def run_pipe(data: bytes) -> bytes:
     """Feed data through a pipe → triggers the streaming/BufReader path."""
@@ -66,11 +56,11 @@ def run_file(data: bytes) -> bytes:
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestYuniq(unittest.TestCase):
 
+class TestYuniq(unittest.TestCase):
     def assertBoth(self, data: bytes) -> None:
         """Assert pipe and mmap outputs both match the oracle."""
-        expected = yuniq_oracle(data)
+        expected = oracle(data)
         self.assertEqual(run_pipe(data), expected, "pipe path")
         self.assertEqual(run_file(data), expected, "mmap path")
 
@@ -141,10 +131,12 @@ class TestYuniq(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 
+
 def build():
     result = subprocess.run(
         ["cargo", "build"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
         cwd=os.path.dirname(os.path.abspath(__file__)),
     )
     if result.returncode != 0:
