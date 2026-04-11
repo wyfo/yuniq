@@ -1,0 +1,24 @@
+[package]
+name = "yuniq"
+version = "0.1.0"
+edition = "2024"
+description = "yuniq is a blazing-fast utility to remove duplicate lines from input."
+license = "MIT"
+repository = "https://github.com/wyfo/yuniq"
+readme = "README.md"
+keywords = ["cli", "uniq", "xxhash", "dedup"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+getargs = "0.5.0"
+hashbrown = "0.17.0"
+memchr = "2"
+memmap2 = "0.9"
+twox-hash = "2.1.2"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+opt-level = "s"
+codegen-units = 1
+strip = true
