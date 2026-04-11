@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, num::NonZero};
 
 use clap::Parser;
 use hashbrown::HashSet;
@@ -32,13 +32,13 @@ fn write_all(mut slice: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn read(buf: &mut [u8]) -> io::Result<usize> {
+fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
     // SAFETY: buf is a valid writable buffer for buf.len() bytes.
     let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(n as usize)
+    Ok(NonZero::new(n as usize))
 }
 
 struct Deduplicator {
@@ -73,11 +73,12 @@ fn process_chunk(
 ) -> io::Result<usize> {
     let mut pos = 0;
     let mut write_start = 0;
-    while pos < data.len()
-        && let Some(next) = memchr(b'\n', &data[pos..])
-            .map(|i| pos + i + 1)
-            .or_else(|| is_final.then_some(data.len()))
-    {
+    while pos < data.len() {
+        let next = match memchr(b'\n', &data[pos..]) {
+            Some(i) => pos + i + 1,
+            None if is_final => data.len(),
+            None => break,
+        };
         if dedup.is_duplicate(&data[pos..next]) {
             write(&data[write_start..pos])?;
             write_start = next;
@@ -96,19 +97,15 @@ fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
 fn process_stream(mut dedup: Deduplicator) -> io::Result<()> {
     let mut buf = vec![0u8; READ_BUF_SIZE];
     let mut leftover = 0usize;
-    while let n = read(&mut buf[leftover..])?
-        && n > 0
-    {
-        let filled = leftover + n;
+    while let Some(n) = read(&mut buf[leftover..])? {
+        let filled = leftover + n.get();
         leftover = process_chunk(&buf[..filled], &mut dedup, false, write_all)?;
         buf.copy_within(filled - leftover..filled, 0);
         if leftover == buf.len() {
             buf.resize(buf.len() * 2, 0);
         }
     }
-    if leftover > 0 && !dedup.is_duplicate(&buf[..leftover]) {
-        write_all(&buf[..leftover])?;
-    }
+    process_chunk(&buf[..leftover], &mut dedup, true, write_all)?;
     Ok(())
 }
 
