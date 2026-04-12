@@ -30,22 +30,20 @@ struct Args {
 }
 
 fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
-    let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
+    match unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) } {
+        n if n >= 0 => Ok(NonZero::new(n as usize)),
+        _ => Err(io::Error::last_os_error()),
     }
-    Ok(NonZero::new(n as usize))
 }
 
 struct RawStdout;
 
 impl Write for RawStdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
+        match unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) } {
+            n if n >= 0 => Ok(n as usize),
+            _ => Err(io::Error::last_os_error()),
         }
-        Ok(n as usize)
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
