@@ -1,7 +1,7 @@
 use std::{io, num::NonZero};
 
 use clap::Parser;
-use hashbrown::HashSet;
+use hashbrown::{HashSet, HashTable};
 use memchr::memchr;
 use memmap2::MmapOptions;
 use twox_hash::{XxHash3_64, XxHash3_128};
@@ -48,14 +48,14 @@ fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
 }
 
 enum Deduplicator {
-    Fast(HashSet<u64>),
+    Fast(HashTable<u64>),
     Default(HashSet<u128>),
 }
 
 impl Deduplicator {
     fn new(capacity: usize, fast: bool) -> Self {
         if fast {
-            Self::Fast(HashSet::with_capacity(capacity))
+            Self::Fast(HashTable::with_capacity(capacity))
         } else {
             Self::Default(HashSet::with_capacity(capacity))
         }
@@ -63,16 +63,21 @@ impl Deduplicator {
 
     #[allow(clippy::wrong_self_convention)]
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
-        let mut end = line.len();
-        if end > 0 && line[end - 1] == b'\n' {
-            end -= 1;
-        }
-        if end > 0 && line[end - 1] == b'\r' {
-            end -= 1;
-        }
+        let key = match line {
+            [l @ .., b'\r', b'\n'] => l,
+            [l @ .., b'\n'] => l,
+            l => l,
+        };
         match self {
-            Self::Fast(seen) => !seen.insert(XxHash3_64::oneshot(&line[..end])),
-            Self::Default(seen) => !seen.insert(XxHash3_128::oneshot(&line[..end])),
+            Self::Fast(seen) => {
+                let hash = XxHash3_64::oneshot(key);
+                if seen.find(hash, |&k| k == hash).is_some() {
+                    return true;
+                }
+                seen.insert_unique(hash, hash, |&k| k);
+                false
+            }
+            Self::Default(seen) => !seen.insert(XxHash3_128::oneshot(key)),
         }
     }
 }
