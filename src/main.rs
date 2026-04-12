@@ -117,9 +117,11 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
     while let Some(n) = read(&mut buf[leftover..])? {
         let filled = leftover + n.get();
         leftover = process_chunk(&buf[..filled], &mut dedup, false, write_all)?;
-        buf.copy_within(filled - leftover..filled, 0);
-        if leftover == buf.len() {
-            buf.resize(buf.len() * 2, 0);
+        if leftover > 0 {
+            buf.copy_within(filled - leftover..filled, 0);
+            if leftover == buf.len() {
+                buf.resize(buf.len() * 2, 0);
+            }
         }
     }
     process_chunk(&buf[..leftover], &mut dedup, true, write_all)?;
