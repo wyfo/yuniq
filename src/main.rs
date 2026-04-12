@@ -5,7 +5,7 @@ use std::{
 
 use clap::Parser;
 use hashbrown::{HashSet, HashTable};
-use memchr::memchr;
+use memchr::{memchr, memchr2};
 use memmap2::MmapOptions;
 use twox_hash::{XxHash3_64, XxHash3_128};
 
@@ -27,6 +27,9 @@ struct Args {
     /// Skip the first N characters of each line before comparing
     #[arg(short = 's', long)]
     skip_chars: Option<usize>,
+    /// Skip the first N whitespace-delimited fields of each line before comparing
+    #[arg(short = 'f', long)]
+    skip_fields: Option<usize>,
 }
 
 fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
@@ -69,6 +72,7 @@ struct Deduplicator {
     seen: DeduplicatorSeen,
     skip_chars: Option<NonZero<usize>>,
     check_chars: Option<NonZero<usize>>,
+    skip_fields: Option<NonZero<usize>>,
 }
 
 impl Deduplicator {
@@ -79,6 +83,19 @@ impl Deduplicator {
             [l @ .., b'\n'] => l,
             l => l,
         };
+        if let Some(n) = self.skip_fields {
+            for _ in 0..n.get() {
+                // skip leading blanks — simple loop, typically 0–2 bytes at field boundary
+                let i = key
+                    .iter()
+                    .position(|&b| b != b' ' && b != b'\t')
+                    .unwrap_or(key.len());
+                key = &key[i..];
+                // skip non-blank field — memchr2 uses SIMD for arbitrarily long fields
+                let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
+                key = &key[i..];
+            }
+        }
         if let Some(skip) = self.skip_chars {
             key = &key[skip.get().min(key.len())..];
         }
@@ -163,6 +180,7 @@ fn deduplicate(args: Args) -> io::Result<()> {
         seen: DeduplicatorSeen::new(args.capacity, args.fast),
         skip_chars: args.skip_chars.and_then(NonZero::new),
         check_chars: args.check_chars.map(|c| NonZero::new(c).unwrap()),
+        skip_fields: args.skip_fields.and_then(NonZero::new),
     };
     let mut writer = io::BufWriter::new(RawStdout);
     // SAFETY: we do not mutate the mapped file while the mapping is live.

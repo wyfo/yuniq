@@ -128,6 +128,25 @@ class TestYuniq(unittest.TestCase):
         self.check("only\n", "only\n", ["-w", "0"])
         self.check("", "", ["-w", "0"])
 
+    def test_skip_fields_basic(self):
+        self.check("a foo\nb foo\na bar\n", "a foo\na bar\n", ["-f", "1"])
+
+    def test_skip_fields_zero(self):
+        # -f 0 is a no-op: compare full lines
+        self.check("a foo\nb foo\n", "a foo\nb foo\n", ["-f", "0"])
+
+    def test_skip_fields_beyond_end(self):
+        # skipping more fields than exist → empty key → all lines collapse to first
+        self.check("a\nb\nc\n", "a\n", ["-f", "5"])
+
+    def test_skip_fields_multi_space(self):
+        # multiple spaces between fields are treated as one separator
+        self.check("a  foo\nb  foo\na  bar\n", "a  foo\na  bar\n", ["-f", "1"])
+
+    def test_skip_fields_with_skip_chars(self):
+        # -f 1 skips first field, then -s 3 skips 3 more chars of the remainder
+        self.check("ts1 xx rest\nts2 yy rest\nts1 xx other\n", "ts1 xx rest\nts1 xx other\n", ["-f", "1", "-s", "3"])
+
 
 # ---------------------------------------------------------------------------
 
