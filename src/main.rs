@@ -59,10 +59,15 @@ impl Write for RawStdout {
 }
 
 enum DeduplicatorSeen {
+    // The hash itself is stored as the value; a hash collision is treated as a
+    // duplicate (false positive). The collision risk grows with the number of
+    // distinct lines but remains low given XxHash3_64's 64-bit output space.
     Fast(HashTable<u64>),
+    // 128-bit hash makes collisions negligible without storing the raw bytes.
     Default(HashSet<u128>),
     Safe {
-        // TODO comment that slice are referencing buffers
+        // Each NonNull<[u8]> points into one of the owned `buffers` vecs below.
+        // The table must not outlive those vecs.
         table: HashTable<(u64, NonNull<[u8]>)>,
         buffers: Vec<Vec<u8>>,
     },
@@ -120,6 +125,8 @@ impl Deduplicator {
                     let i = key.iter().position(is_blank).unwrap_or(key.len());
                     key = &key[i..];
                     let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
+                    // SAFETY: memchr2 returns an index within `key`, but the
+                    // compiler cannot prove it.
                     key = unsafe { key.get_unchecked(i..) };
                 }
             }
@@ -170,6 +177,9 @@ fn process_chunk(
     writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<usize> {
     let mut pos = 0;
+    // Tracks the start of the current run of unique lines. When a duplicate is
+    // found, we flush [write_start..pos] (everything before the duplicate) in
+    // one write, then skip the duplicate by advancing write_start past it.
     let mut write_start = 0;
     while pos < data.len() {
         let next = match memchr(b'\n', &data[pos..]) {
@@ -177,6 +187,9 @@ fn process_chunk(
             None if is_final => data.len(),
             None => break,
         };
+        // Help the compiler to remove bound checks by making invariants explicit.
+        // SAFETY: next is either pos + newline_offset + 1 (bounded by data.len())
+        // or data.len(); pos < next by construction; write_start only moves forward.
         unsafe { assert_unchecked(next <= data.len() && pos < next && write_start <= pos) };
         if dedup.is_duplicate(&data[pos..next]) {
             writer.write_all(&data[write_start..pos])?;
@@ -184,7 +197,11 @@ fn process_chunk(
         }
         pos = next;
     }
+    // Help the compiler to remove bound checks by making invariants explicit.
+    // SAFETY: the loop only advances pos forward and breaks before data.len();
+    // write_start <= pos because it only moves to next, which was pos's prior value.
     unsafe { assert_unchecked(pos <= data.len() && write_start <= pos) };
+    // Flush the trailing run of unique lines not yet written.
     writer.write_all(&data[write_start..pos])?;
     Ok(pos)
 }
@@ -202,28 +219,40 @@ fn process_stream(
     mut dedup: Deduplicator,
     writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<()> {
+    // We manage the read buffer manually rather than using BufReader so we can
+    // control its capacity (64 KB was benchmarked as optimal) and, in safe mode,
+    // hand ownership of the buffer to the deduplicator once it's full.
     let mut buf = Vec::with_capacity(READ_BUF_SIZE);
     while let Some(n) = read(buf.spare_capacity_mut())? {
         unsafe { buf.set_len(buf.len() + n.get()) };
         let processed = process_chunk(&buf, &mut dedup, false, writer)?;
+        // `processed < buf.len()` means the last line had no newline yet; keep
+        // the unprocessed tail and continue reading. Three sub-cases:
         if processed < buf.len() {
             if processed == 0 {
+                // The entire buffer is one unterminated line; double capacity to
+                // make room without losing data.
                 buf.reserve(buf.len());
             } else if let Some(buffers) = dedup.buffers() {
+                // Safe mode: the table holds raw pointers into `buf`, so we
+                // cannot drain it. Move it into `buffers` and start a fresh one.
                 let mut new_buf = Vec::with_capacity(READ_BUF_SIZE);
                 new_buf.extend_from_slice(&buf[processed..]);
                 buffers.push(buf);
                 buf = new_buf;
             } else {
+                // Normal mode: drain the processed prefix in place.
                 buf.drain(..processed);
             }
         } else if let Some(buffers) = dedup.buffers() {
+            // Safe mode, buffer fully consumed: archive it and start fresh.
             buffers.push(buf);
             buf = Vec::with_capacity(READ_BUF_SIZE);
         } else {
             buf.clear();
         }
     }
+    // Process whatever remains after EOF as the final (possibly unterminated) chunk.
     process_chunk(&buf, &mut dedup, true, writer)?;
     if let Some(buffers) = dedup.buffers() {
         // Store the buffer for consistency.
