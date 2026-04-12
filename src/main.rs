@@ -1,4 +1,5 @@
 use std::{
+    hint::assert_unchecked,
     io::{self, ErrorKind, Write},
     mem::MaybeUninit,
     num::NonZero,
@@ -45,7 +46,6 @@ fn read(buf: &mut [MaybeUninit<u8>]) -> io::Result<Option<NonZero<usize>>> {
 }
 
 struct RawStdout;
-
 impl Write for RawStdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) } {
@@ -62,6 +62,7 @@ enum DeduplicatorSeen {
     Fast(HashTable<u64>),
     Default(HashSet<u128>),
     Safe {
+        // TODO comment that slice are referencing buffers
         table: HashTable<(u64, NonNull<[u8]>)>,
         buffers: Vec<Vec<u8>>,
     },
@@ -100,14 +101,13 @@ impl Deduplicator {
         if let Some(n) = self.skip_fields {
             for _ in 0..n.get() {
                 // skip leading blanks — simple loop, typically 0–2 bytes at field boundary
-                let i = key
-                    .iter()
-                    .position(|&b| b != b' ' && b != b'\t')
-                    .unwrap_or(key.len());
+                let is_blank = |&b| b != b' ' && b != b'\t';
+                let i = key.iter().position(is_blank).unwrap_or(key.len());
                 key = &key[i..];
                 // skip non-blank field — memchr2 uses SIMD for arbitrarily long fields
                 let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
-                key = &key[i..];
+                // TODO compiler cannot deduce that i is a valid index
+                key = unsafe { key.get_unchecked(i..) };
             }
         }
         if let Some(skip) = self.skip_chars {
@@ -163,14 +163,16 @@ fn process_chunk(
             None if is_final => data.len(),
             None => break,
         };
+        unsafe { assert_unchecked(next <= data.len() && pos < next && write_start <= pos) };
         if dedup.is_duplicate(&data[pos..next]) {
             writer.write_all(&data[write_start..pos])?;
             write_start = next;
         }
         pos = next;
     }
+    unsafe { assert_unchecked(pos <= data.len() && write_start <= pos) };
     writer.write_all(&data[write_start..pos])?;
-    Ok(data.len() - pos)
+    Ok(pos)
 }
 
 fn process_mmap(
@@ -189,17 +191,17 @@ fn process_stream(
     let mut buf = Vec::with_capacity(READ_BUF_SIZE);
     while let Some(n) = read(buf.spare_capacity_mut())? {
         unsafe { buf.set_len(buf.len() + n.get()) };
-        let leftover = process_chunk(&buf, &mut dedup, false, writer)?;
-        if leftover > 0 {
-            if leftover == buf.len() {
+        let processed = process_chunk(&buf, &mut dedup, false, writer)?;
+        if processed < buf.len() {
+            if processed == 0 {
                 buf.reserve(buf.len());
             } else if let Some(buffers) = dedup.buffers() {
                 let mut new_buf = Vec::with_capacity(READ_BUF_SIZE);
-                new_buf.extend_from_slice(&buf[buf.len() - leftover..]);
+                new_buf.extend_from_slice(&buf[processed..]);
                 buffers.push(buf);
                 buf = new_buf;
             } else {
-                buf.drain(..buf.len() - leftover);
+                buf.drain(..processed);
             }
         } else if let Some(buffers) = dedup.buffers() {
             buffers.push(buf);
