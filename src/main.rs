@@ -43,10 +43,9 @@ impl Write for RawStdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) };
         if n < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(n as usize)
+            return Err(io::Error::last_os_error());
         }
+        Ok(n as usize)
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
@@ -102,13 +101,12 @@ impl Deduplicator {
     }
 }
 
-// Returns Ok(Some(leftover)) on success, Ok(None) on broken pipe.
 fn process_chunk(
     data: &[u8],
     dedup: &mut Deduplicator,
     is_final: bool,
     writer: &mut io::BufWriter<RawStdout>,
-) -> io::Result<Option<usize>> {
+) -> io::Result<usize> {
     let mut pos = 0;
     let mut write_start = 0;
     while pos < data.len() {
@@ -118,18 +116,13 @@ fn process_chunk(
             None => break,
         };
         if dedup.is_duplicate(&data[pos..next]) {
-            match writer.write_all(&data[write_start..pos]) {
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(None),
-                res => res?,
-            }
+            writer.write_all(&data[write_start..pos])?;
             write_start = next;
         }
         pos = next;
     }
-    match writer.write_all(&data[write_start..pos]) {
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(None),
-        res => res.map(|_| Some(data.len() - pos)),
-    }
+    writer.write_all(&data[write_start..pos])?;
+    Ok(data.len() - pos)
 }
 
 fn process_mmap(
@@ -149,10 +142,7 @@ fn process_stream(
     let mut leftover = 0usize;
     while let Some(n) = read(&mut buf[leftover..])? {
         let filled = leftover + n.get();
-        match process_chunk(&buf[..filled], &mut dedup, false, writer)? {
-            Some(l) => leftover = l,
-            None => return Ok(()),
-        };
+        leftover = process_chunk(&buf[..filled], &mut dedup, false, writer)?;
         if leftover > 0 {
             buf.copy_within(filled - leftover..filled, 0);
             if leftover == buf.len() {
@@ -164,16 +154,12 @@ fn process_stream(
     Ok(())
 }
 
-fn main() -> io::Result<()> {
-    let args = Args::parse();
+fn deduplicate(args: Args) -> io::Result<()> {
     // Dumb case, no chars are checked, every line is a duplicate, so just print the first line.
     if args.check_chars == Some(0) {
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
-        return match io::stdout().write_all(line.as_bytes()) {
-            Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
-            res => res,
-        };
+        return io::stdout().write_all(line.as_bytes());
     }
     let dedup = Deduplicator {
         seen: DeduplicatorSeen::new(args.capacity, args.fast),
@@ -186,7 +172,11 @@ fn main() -> io::Result<()> {
         Ok(mmap) => process_mmap(&mmap, dedup, &mut writer)?,
         Err(_) => process_stream(dedup, &mut writer)?,
     }
-    match writer.flush() {
+    writer.flush()
+}
+
+fn main() -> io::Result<()> {
+    match deduplicate(Args::parse()) {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
         res => res,
     }
