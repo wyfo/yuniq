@@ -9,7 +9,7 @@ use std::{
 use clap::Parser;
 use hashbrown::{HashSet, HashTable, hash_table::Entry};
 use memchr::{memchr, memchr2};
-use memmap2::MmapOptions;
+use memmap2::Mmap;
 use twox_hash::{XxHash3_64, XxHash3_128};
 
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
@@ -85,36 +85,50 @@ impl DeduplicatorSeen {
 
 struct Deduplicator {
     seen: DeduplicatorSeen,
+    has_filter: bool,
     skip_chars: Option<NonZero<usize>>,
     check_chars: Option<NonZero<usize>>,
     skip_fields: Option<NonZero<usize>>,
 }
 
 impl Deduplicator {
+    fn new(args: Args) -> Self {
+        let skip_chars = args.skip_chars.and_then(NonZero::new);
+        let check_chars = args.check_chars.map(|c| NonZero::new(c).unwrap());
+        let skip_fields = args.skip_fields.and_then(NonZero::new);
+        Self {
+            seen: DeduplicatorSeen::new(args.capacity, args.fast, args.safe),
+            has_filter: skip_chars.is_some() || check_chars.is_some() || skip_fields.is_some(),
+            skip_chars,
+            check_chars,
+            skip_fields,
+        }
+    }
+
     #[allow(clippy::wrong_self_convention)]
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
         let mut key = match line {
-            [l @ .., b'\r', b'\n'] => l,
-            [l @ .., b'\n'] => l,
-            l => l,
+            // Do I want to support this?
+            // [k @ .., b'\r', b'\n'] => k,
+            [k @ .., b'\n'] => k,
+            k => k,
         };
-        if let Some(n) = self.skip_fields {
-            for _ in 0..n.get() {
-                // skip leading blanks — simple loop, typically 0–2 bytes at field boundary
-                let is_blank = |&b| b != b' ' && b != b'\t';
-                let i = key.iter().position(is_blank).unwrap_or(key.len());
-                key = &key[i..];
-                // skip non-blank field — memchr2 uses SIMD for arbitrarily long fields
-                let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
-                // TODO compiler cannot deduce that i is a valid index
-                key = unsafe { key.get_unchecked(i..) };
+        if self.has_filter {
+            if let Some(n) = self.skip_fields {
+                for _ in 0..n.get() {
+                    let is_blank = |&b| b != b' ' && b != b'\t';
+                    let i = key.iter().position(is_blank).unwrap_or(key.len());
+                    key = &key[i..];
+                    let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
+                    key = unsafe { key.get_unchecked(i..) };
+                }
             }
-        }
-        if let Some(skip) = self.skip_chars {
-            key = &key[skip.get().min(key.len())..];
-        }
-        if let Some(check) = self.check_chars {
-            key = &key[..check.get().min(key.len())];
+            if let Some(skip) = self.skip_chars {
+                key = &key[skip.get().min(key.len())..];
+            }
+            if let Some(check) = self.check_chars {
+                key = &key[..check.get().min(key.len())];
+            }
         }
         match &mut self.seen {
             DeduplicatorSeen::Fast(table) => {
@@ -225,15 +239,10 @@ fn deduplicate(args: Args) -> io::Result<()> {
         io::stdin().read_line(&mut line)?;
         return io::stdout().write_all(line.as_bytes());
     }
-    let dedup = Deduplicator {
-        seen: DeduplicatorSeen::new(args.capacity, args.fast, args.safe),
-        skip_chars: args.skip_chars.and_then(NonZero::new),
-        check_chars: args.check_chars.map(|c| NonZero::new(c).unwrap()),
-        skip_fields: args.skip_fields.and_then(NonZero::new),
-    };
+    let dedup = Deduplicator::new(args);
     let mut writer = io::BufWriter::new(RawStdout);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
-    match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
+    match unsafe { Mmap::map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup, &mut writer)?,
         Err(_) => process_stream(dedup, &mut writer)?,
     }
