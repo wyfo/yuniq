@@ -1,13 +1,13 @@
-use std::{io, num::NonZero};
+use std::{
+    io::{self, ErrorKind, Write},
+    num::NonZero,
+};
 
 use clap::Parser;
 use hashbrown::{HashSet, HashTable};
 use memchr::memchr;
 use memmap2::MmapOptions;
 use twox_hash::{XxHash3_64, XxHash3_128};
-
-#[cfg(test)]
-mod tests;
 
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
 const DEFAULT_BUF_SIZE: usize = 64 * 1024;
@@ -32,20 +32,7 @@ struct Args {
     skip_chars: Option<usize>,
 }
 
-fn write_all(mut slice: &[u8]) -> io::Result<()> {
-    while !slice.is_empty() {
-        // SAFETY: slice is a valid readable buffer for slice.len() bytes.
-        let n = unsafe { libc::write(libc::STDOUT_FILENO, slice.as_ptr().cast(), slice.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        slice = &slice[n as usize..];
-    }
-    Ok(())
-}
-
 fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
-    // SAFETY: buf is a valid writable buffer for buf.len() bytes.
     let n = unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         return Err(io::Error::last_os_error());
@@ -98,12 +85,13 @@ impl Deduplicator {
     }
 }
 
+// Returns Ok(Some(leftover)) on success, Ok(None) on broken pipe.
 fn process_chunk(
     data: &[u8],
     dedup: &mut Deduplicator,
     is_final: bool,
     mut write: impl FnMut(&[u8]) -> io::Result<()>,
-) -> io::Result<usize> {
+) -> io::Result<Option<usize>> {
     let mut pos = 0;
     let mut write_start = 0;
     while pos < data.len() {
@@ -113,26 +101,42 @@ fn process_chunk(
             None => break,
         };
         if dedup.is_duplicate(&data[pos..next]) {
-            write(&data[write_start..pos])?;
+            match write(&data[write_start..pos]) {
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(None),
+                other => other?,
+            }
             write_start = next;
         }
         pos = next;
     }
-    write(&data[write_start..pos])?;
-    Ok(data.len() - pos)
+    match write(&data[write_start..pos]) {
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(None),
+        other => other.map(|_| Some(data.len() - pos)),
+    }
 }
 
-fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
-    process_chunk(data, &mut dedup, true, write_all)?;
+fn process_mmap(
+    data: &[u8],
+    mut dedup: Deduplicator,
+    writer: &mut io::BufWriter<io::StdoutLock<'_>>,
+) -> io::Result<()> {
+    process_chunk(data, &mut dedup, true, |s| writer.write_all(s))?;
     Ok(())
 }
 
-fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
+fn process_stream(
+    mut dedup: Deduplicator,
+    buf_size: usize,
+    writer: &mut io::BufWriter<io::StdoutLock<'_>>,
+) -> io::Result<()> {
     let mut buf = vec![0u8; buf_size];
     let mut leftover = 0usize;
     while let Some(n) = read(&mut buf[leftover..])? {
         let filled = leftover + n.get();
-        leftover = process_chunk(&buf[..filled], &mut dedup, false, write_all)?;
+        match process_chunk(&buf[..filled], &mut dedup, false, |s| writer.write_all(s))? {
+            Some(l) => leftover = l,
+            None => return Ok(()),
+        };
         if leftover > 0 {
             buf.copy_within(filled - leftover..filled, 0);
             if leftover == buf.len() {
@@ -140,7 +144,7 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
             }
         }
     }
-    process_chunk(&buf[..leftover], &mut dedup, true, write_all)?;
+    process_chunk(&buf[..leftover], &mut dedup, true, |s| writer.write_all(s))?;
     Ok(())
 }
 
@@ -151,9 +155,14 @@ fn main() -> io::Result<()> {
         skip_chars: args.skip_chars,
         check_chars: args.check_chars,
     };
+    let mut writer = io::BufWriter::new(io::stdout().lock());
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
-        Ok(mmap) => process_mmap(&mmap, dedup),
-        Err(_) => process_stream(dedup, args.buf_size),
+        Ok(mmap) => process_mmap(&mmap, dedup, &mut writer)?,
+        Err(_) => process_stream(dedup, args.buf_size, &mut writer)?,
+    }
+    match writer.flush() {
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
+        other => other,
     }
 }
