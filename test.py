@@ -39,17 +39,19 @@ def oracle(data: bytes) -> bytearray:
 # ---------------------------------------------------------------------------
 
 
-def run_pipe(data: bytes) -> bytes:
+def run_pipe(data: bytes, extra_args: list[str] = None) -> bytes:
     """Feed data through a pipe → triggers the streaming/BufReader path."""
-    return subprocess.run([BINARY], input=data, capture_output=True).stdout
+    args = [BINARY] + (extra_args or [])
+    return subprocess.run(args, input=data, capture_output=True).stdout
 
 
-def run_file(data: bytes) -> bytes:
+def run_file(data: bytes, extra_args: list[str] = None) -> bytes:
     """Feed data from a regular file → triggers the mmap path."""
+    args = [BINARY] + (extra_args or [])
     with tempfile.TemporaryFile() as f:
         f.write(data)
         f.flush()
-        return subprocess.run([BINARY], stdin=f, capture_output=True).stdout
+        return subprocess.run(args, stdin=f, capture_output=True).stdout
 
 
 # ---------------------------------------------------------------------------
@@ -58,75 +60,76 @@ def run_file(data: bytes) -> bytes:
 
 
 class TestYuniq(unittest.TestCase):
-    def assertBoth(self, data: bytes) -> None:
-        """Assert pipe and mmap outputs both match the oracle."""
+    def check(self, data: bytes) -> None:
+        """Assert pipe and mmap outputs both match the oracle, for default and --fast."""
         expected = oracle(data)
-        self.assertEqual(run_pipe(data), expected, "pipe path")
-        self.assertEqual(run_file(data), expected, "mmap path")
+        for run in [run_pipe, run_file]:
+            for args in [[], ["--fast"]]:
+                self.assertEqual(run_pipe(data, args), expected, f"{run.__name__}({args=})")
 
     def test_basic_dedup(self):
-        self.assertBoth(b"foo\nbar\nfoo\nbaz\nbar\n")
+        self.check(b"foo\nbar\nfoo\nbaz\nbar\n")
 
     def test_all_unique(self):
-        self.assertBoth(b"alpha\nbeta\ngamma\n")
+        self.check(b"alpha\nbeta\ngamma\n")
 
     def test_all_dupes(self):
-        self.assertBoth(b"x\nx\nx\n")
+        self.check(b"x\nx\nx\n")
 
     def test_empty_input(self):
-        self.assertBoth(b"")
+        self.check(b"")
 
     def test_no_trailing_newline(self):
-        self.assertBoth(b"foo\nbar\nfoo\nbar")
+        self.check(b"foo\nbar\nfoo\nbar")
 
     def test_crlf(self):
-        self.assertBoth(b"foo\r\nbar\r\nfoo\r\n")
+        self.check(b"foo\r\nbar\r\nfoo\r\n")
 
     def test_crlf_vs_lf_same_content(self):
-        self.assertBoth(b"foo\r\nfoo\n")
+        self.check(b"foo\r\nfoo\n")
 
     def test_blank_lines(self):
-        self.assertBoth(b"foo\n\nbar\n\n")
+        self.check(b"foo\n\nbar\n\n")
 
     def test_single_line_no_newline(self):
-        self.assertBoth(b"hello")
+        self.check(b"hello")
 
     def test_single_line_with_newline(self):
-        self.assertBoth(b"hello\n")
+        self.check(b"hello\n")
 
     def test_order_preserved(self):
-        self.assertBoth(b"c\nb\na\nb\nc\n")
+        self.check(b"c\nb\na\nb\nc\n")
 
     def test_line_larger_than_buf_size(self):
         big = b"A" * (BUF_SIZE + 1000)
-        self.assertBoth(big + b"\n")
-        self.assertBoth(big + b"\n" + big + b"\n")
-        self.assertBoth(b"before\n" + big + b"\nbefore\n" + big + b"\nafter\n")
+        self.check(big + b"\n")
+        self.check(big + b"\n" + big + b"\n")
+        self.check(b"before\n" + big + b"\nbefore\n" + big + b"\nafter\n")
 
     def test_line_much_larger_than_buf_size(self):
         huge = b"B" * (BUF_SIZE * 3 + 7)
-        self.assertBoth(huge + b"\n" + huge + b"\n")
+        self.check(huge + b"\n" + huge + b"\n")
 
     def test_two_distinct_big_lines(self):
         big = b"A" * (BUF_SIZE + 1000)
         huge = b"B" * (BUF_SIZE * 3 + 7)
-        self.assertBoth(big + b"\n" + huge + b"\n")
+        self.check(big + b"\n" + huge + b"\n")
 
     def test_buf_size_boundary_minus_one(self):
         line = b"X" * (BUF_SIZE - 1)
-        self.assertBoth(line + b"\n" + line + b"\n")
+        self.check(line + b"\n" + line + b"\n")
 
     def test_buf_size_boundary_exact(self):
         line = b"X" * BUF_SIZE
-        self.assertBoth(line + b"\n" + line + b"\n")
+        self.check(line + b"\n" + line + b"\n")
 
     def test_buf_size_boundary_plus_one(self):
         line = b"X" * (BUF_SIZE + 1)
-        self.assertBoth(line + b"\n" + line + b"\n")
+        self.check(line + b"\n" + line + b"\n")
 
     def test_many_lines_stress(self):
         lines = [f"line{i}".encode() for i in range(5000)]
-        self.assertBoth(b"\n".join(lines * 3) + b"\n")
+        self.check(b"\n".join(lines * 3) + b"\n")
 
 
 # ---------------------------------------------------------------------------

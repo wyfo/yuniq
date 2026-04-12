@@ -4,7 +4,7 @@ use clap::Parser;
 use hashbrown::HashSet;
 use memchr::memchr;
 use memmap2::MmapOptions;
-use twox_hash::XxHash3_128;
+use twox_hash::{XxHash3_64, XxHash3_128};
 
 #[cfg(test)]
 mod tests;
@@ -21,6 +21,9 @@ struct Args {
     /// Read buffer size in bytes
     #[arg(short, long, default_value_t = DEFAULT_BUF_SIZE)]
     buf_size: usize,
+    /// Use 64-bit hashing (faster, negligible collision risk)
+    #[arg(long)]
+    fast: bool,
 }
 
 fn write_all(mut slice: &[u8]) -> io::Result<()> {
@@ -44,14 +47,17 @@ fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
     Ok(NonZero::new(n as usize))
 }
 
-struct Deduplicator {
-    seen: HashSet<u128>,
+enum Deduplicator {
+    Fast(HashSet<u64>),
+    Default(HashSet<u128>),
 }
 
 impl Deduplicator {
-    fn new(capacity: usize) -> Self {
-        Self {
-            seen: HashSet::with_capacity(capacity),
+    fn new(capacity: usize, fast: bool) -> Self {
+        if fast {
+            Self::Fast(HashSet::with_capacity(capacity))
+        } else {
+            Self::Default(HashSet::with_capacity(capacity))
         }
     }
 
@@ -64,7 +70,10 @@ impl Deduplicator {
         if end > 0 && line[end - 1] == b'\r' {
             end -= 1;
         }
-        !self.seen.insert(XxHash3_128::oneshot(&line[..end]))
+        match self {
+            Self::Fast(seen) => !seen.insert(XxHash3_64::oneshot(&line[..end])),
+            Self::Default(seen) => !seen.insert(XxHash3_128::oneshot(&line[..end])),
+        }
     }
 }
 
@@ -114,7 +123,7 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let dedup = Deduplicator::new(args.capacity);
+    let dedup = Deduplicator::new(args.capacity, args.fast);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup),
