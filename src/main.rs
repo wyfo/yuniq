@@ -58,6 +58,16 @@ enum DeduplicatorSeen {
     Default(HashSet<u128>),
 }
 
+impl DeduplicatorSeen {
+    fn new(capacity: usize, fast: bool) -> Self {
+        if fast {
+            Self::Fast(HashTable::with_capacity(capacity))
+        } else {
+            Self::Default(HashSet::with_capacity(capacity))
+        }
+    }
+}
+
 struct Deduplicator {
     seen: DeduplicatorSeen,
     skip_chars: Option<usize>,
@@ -65,24 +75,6 @@ struct Deduplicator {
 }
 
 impl Deduplicator {
-    fn new(
-        capacity: usize,
-        fast: bool,
-        skip_chars: Option<usize>,
-        check_chars: Option<usize>,
-    ) -> Self {
-        let seen = if fast {
-            DeduplicatorSeen::Fast(HashTable::with_capacity(capacity))
-        } else {
-            DeduplicatorSeen::Default(HashSet::with_capacity(capacity))
-        };
-        Self {
-            seen,
-            skip_chars,
-            check_chars,
-        }
-    }
-
     #[allow(clippy::wrong_self_convention)]
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
         let key = match line {
@@ -154,7 +146,11 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let dedup = Deduplicator::new(args.capacity, args.fast, args.skip_chars, args.check_chars);
+    let dedup = Deduplicator {
+        seen: DeduplicatorSeen::new(args.capacity, args.fast),
+        skip_chars: args.skip_chars,
+        check_chars: args.check_chars,
+    };
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup),

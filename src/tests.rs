@@ -1,8 +1,12 @@
-use crate::{Deduplicator, process_chunk};
+use crate::{Deduplicator, DeduplicatorSeen, process_chunk};
 
 fn run(data: &[u8], is_final: bool) -> (Vec<u8>, usize) {
     let mut out = Vec::new();
-    let mut dedup = Deduplicator::new(16, false, None, None);
+    let mut dedup = Deduplicator {
+        seen: DeduplicatorSeen::new(16, false),
+        skip_chars: None,
+        check_chars: None,
+    };
     let rem = process_chunk(data, &mut dedup, is_final, |s| {
         out.extend_from_slice(s);
         Ok(())
@@ -85,7 +89,11 @@ fn blank_lines() {
 #[test]
 fn write_batching() {
     let mut calls = 0usize;
-    let mut dedup = Deduplicator::new(16, false, None, None);
+    let mut dedup = Deduplicator {
+        seen: DeduplicatorSeen::new(16, false),
+        skip_chars: None,
+        check_chars: None,
+    };
     process_chunk(b"a\nb\nc\n", &mut dedup, false, |s| {
         if !s.is_empty() {
             calls += 1;
