@@ -37,6 +37,22 @@ fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
     Ok(NonZero::new(n as usize))
 }
 
+struct RawStdout;
+
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) };
+        if n < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 enum DeduplicatorSeen {
     Fast(HashTable<u64>),
     Default(HashSet<u128>),
@@ -87,7 +103,7 @@ fn process_chunk(
     data: &[u8],
     dedup: &mut Deduplicator,
     is_final: bool,
-    mut write: impl FnMut(&[u8]) -> io::Result<()>,
+    writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<Option<usize>> {
     let mut pos = 0;
     let mut write_start = 0;
@@ -98,7 +114,7 @@ fn process_chunk(
             None => break,
         };
         if dedup.is_duplicate(&data[pos..next]) {
-            match write(&data[write_start..pos]) {
+            match writer.write_all(&data[write_start..pos]) {
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(None),
                 other => other?,
             }
@@ -106,7 +122,7 @@ fn process_chunk(
         }
         pos = next;
     }
-    match write(&data[write_start..pos]) {
+    match writer.write_all(&data[write_start..pos]) {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(None),
         other => other.map(|_| Some(data.len() - pos)),
     }
@@ -115,21 +131,21 @@ fn process_chunk(
 fn process_mmap(
     data: &[u8],
     mut dedup: Deduplicator,
-    writer: &mut io::BufWriter<io::StdoutLock<'_>>,
+    writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<()> {
-    process_chunk(data, &mut dedup, true, |s| writer.write_all(s))?;
+    process_chunk(data, &mut dedup, true, writer)?;
     Ok(())
 }
 
 fn process_stream(
     mut dedup: Deduplicator,
-    writer: &mut io::BufWriter<io::StdoutLock<'_>>,
+    writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; READ_BUF_SIZE];
     let mut leftover = 0usize;
     while let Some(n) = read(&mut buf[leftover..])? {
         let filled = leftover + n.get();
-        match process_chunk(&buf[..filled], &mut dedup, false, |s| writer.write_all(s))? {
+        match process_chunk(&buf[..filled], &mut dedup, false, writer)? {
             Some(l) => leftover = l,
             None => return Ok(()),
         };
@@ -140,7 +156,7 @@ fn process_stream(
             }
         }
     }
-    process_chunk(&buf[..leftover], &mut dedup, true, |s| writer.write_all(s))?;
+    process_chunk(&buf[..leftover], &mut dedup, true, writer)?;
     Ok(())
 }
 
@@ -151,7 +167,7 @@ fn main() -> io::Result<()> {
         skip_chars: args.skip_chars,
         check_chars: args.check_chars,
     };
-    let mut writer = io::BufWriter::new(io::stdout().lock());
+    let mut writer = io::BufWriter::new(RawStdout);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup, &mut writer)?,
