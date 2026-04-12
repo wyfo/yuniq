@@ -1,10 +1,12 @@
 use std::{
     io::{self, ErrorKind, Write},
+    mem::MaybeUninit,
     num::NonZero,
+    ptr::NonNull,
 };
 
 use clap::Parser;
-use hashbrown::{HashSet, HashTable};
+use hashbrown::{HashSet, HashTable, hash_table::Entry};
 use memchr::{memchr, memchr2};
 use memmap2::MmapOptions;
 use twox_hash::{XxHash3_64, XxHash3_128};
@@ -21,6 +23,9 @@ struct Args {
     /// Use 64-bit hashing (faster, negligible collision risk)
     #[arg(long)]
     fast: bool,
+    /// Store exact line bytes for collision-free deduplication (slower)
+    #[arg(long, alias = "slow", conflicts_with = "fast")]
+    safe: bool,
     /// Only compare the first N characters of each line
     #[arg(short = 'w', long)]
     check_chars: Option<usize>,
@@ -32,7 +37,7 @@ struct Args {
     skip_fields: Option<usize>,
 }
 
-fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
+fn read(buf: &mut [MaybeUninit<u8>]) -> io::Result<Option<NonZero<usize>>> {
     match unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) } {
         n if n >= 0 => Ok(NonZero::new(n as usize)),
         _ => Err(io::Error::last_os_error()),
@@ -56,11 +61,20 @@ impl Write for RawStdout {
 enum DeduplicatorSeen {
     Fast(HashTable<u64>),
     Default(HashSet<u128>),
+    Safe {
+        table: HashTable<(u64, NonNull<[u8]>)>,
+        buffers: Vec<Vec<u8>>,
+    },
 }
 
 impl DeduplicatorSeen {
-    fn new(capacity: usize, fast: bool) -> Self {
-        if fast {
+    fn new(capacity: usize, fast: bool, safe: bool) -> Self {
+        if safe {
+            Self::Safe {
+                table: HashTable::with_capacity(capacity),
+                buffers: Vec::new(),
+            }
+        } else if fast {
             Self::Fast(HashTable::with_capacity(capacity))
         } else {
             Self::Default(HashSet::with_capacity(capacity))
@@ -103,15 +117,34 @@ impl Deduplicator {
             key = &key[..check.get().min(key.len())];
         }
         match &mut self.seen {
-            DeduplicatorSeen::Fast(seen) => {
+            DeduplicatorSeen::Fast(table) => {
                 let hash = XxHash3_64::oneshot(key);
-                if seen.find(hash, |&k| k == hash).is_some() {
-                    return true;
+                match table.entry(hash, |h| *h == hash, |h| *h) {
+                    Entry::Occupied(_) => true,
+                    Entry::Vacant(entry) => {
+                        entry.insert(hash);
+                        false
+                    }
                 }
-                seen.insert_unique(hash, hash, |&k| k);
-                false
             }
-            DeduplicatorSeen::Default(seen) => !seen.insert(XxHash3_128::oneshot(key)),
+            DeduplicatorSeen::Default(set) => !set.insert(XxHash3_128::oneshot(key)),
+            DeduplicatorSeen::Safe { table, .. } => {
+                let hash = XxHash3_64::oneshot(key);
+                match table.entry(hash, |(_, k)| unsafe { k.as_ref() } == key, |(h, _)| *h) {
+                    Entry::Occupied(_) => true,
+                    Entry::Vacant(entry) => {
+                        entry.insert((hash, key.into()));
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    fn buffers(&mut self) -> Option<&mut Vec<Vec<u8>>> {
+        match &mut self.seen {
+            DeduplicatorSeen::Safe { buffers, .. } => Some(buffers),
+            _ => None,
         }
     }
 }
@@ -153,19 +186,33 @@ fn process_stream(
     mut dedup: Deduplicator,
     writer: &mut io::BufWriter<RawStdout>,
 ) -> io::Result<()> {
-    let mut buf = vec![0u8; READ_BUF_SIZE];
-    let mut leftover = 0usize;
-    while let Some(n) = read(&mut buf[leftover..])? {
-        let filled = leftover + n.get();
-        leftover = process_chunk(&buf[..filled], &mut dedup, false, writer)?;
+    let mut buf = Vec::with_capacity(READ_BUF_SIZE);
+    while let Some(n) = read(buf.spare_capacity_mut())? {
+        unsafe { buf.set_len(buf.len() + n.get()) };
+        let leftover = process_chunk(&buf, &mut dedup, false, writer)?;
         if leftover > 0 {
-            buf.copy_within(filled - leftover..filled, 0);
             if leftover == buf.len() {
-                buf.resize(buf.len() * 2, 0);
+                buf.reserve(buf.len());
+            } else if let Some(buffers) = dedup.buffers() {
+                let mut new_buf = Vec::with_capacity(READ_BUF_SIZE);
+                new_buf.extend_from_slice(&buf[buf.len() - leftover..]);
+                buffers.push(buf);
+                buf = new_buf;
+            } else {
+                buf.drain(..buf.len() - leftover);
             }
+        } else if let Some(buffers) = dedup.buffers() {
+            buffers.push(buf);
+            buf = Vec::with_capacity(READ_BUF_SIZE);
+        } else {
+            buf.clear();
         }
     }
-    process_chunk(&buf[..leftover], &mut dedup, true, writer)?;
+    process_chunk(&buf, &mut dedup, true, writer)?;
+    if let Some(buffers) = dedup.buffers() {
+        // Store the buffer for consistency.
+        buffers.push(buf);
+    }
     Ok(())
 }
 
@@ -177,7 +224,7 @@ fn deduplicate(args: Args) -> io::Result<()> {
         return io::stdout().write_all(line.as_bytes());
     }
     let dedup = Deduplicator {
-        seen: DeduplicatorSeen::new(args.capacity, args.fast),
+        seen: DeduplicatorSeen::new(args.capacity, args.fast, args.safe),
         skip_chars: args.skip_chars.and_then(NonZero::new),
         check_chars: args.check_chars.map(|c| NonZero::new(c).unwrap()),
         skip_fields: args.skip_fields.and_then(NonZero::new),

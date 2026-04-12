@@ -43,7 +43,7 @@ class TestYuniq(unittest.TestCase):
     def check(self, data: str, expected: str, extra_args: list[str] = None) -> None:
         """Assert both pipe and mmap outputs equal expected, with and without --fast."""
         for run in (run_pipe, run_file):
-            for args in ([], ["--fast"]):
+            for args in ([], ["--fast"], ["--safe"]):
                 self.assertEqual(run(data, args + (extra_args or [])), expected, f"{run.__name__}{args}")
 
     def test_basic_dedup(self):
