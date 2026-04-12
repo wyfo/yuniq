@@ -10,7 +10,7 @@ use twox_hash::XxHash3_128;
 mod tests;
 
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
-const READ_BUF_SIZE: usize = 64 * 1024;
+const DEFAULT_BUF_SIZE: usize = 64 * 1024;
 
 #[derive(Parser)]
 #[command(about = "Hyperfast line deduplicator")]
@@ -18,6 +18,9 @@ struct Args {
     /// Expected number of lines
     #[arg(short, long, default_value_t = DEFAULT_CAPACITY)]
     capacity: usize,
+    /// Read buffer size in bytes
+    #[arg(short, long, default_value_t = DEFAULT_BUF_SIZE)]
+    buf_size: usize,
 }
 
 fn write_all(mut slice: &[u8]) -> io::Result<()> {
@@ -94,8 +97,8 @@ fn process_mmap(data: &[u8], mut dedup: Deduplicator) -> io::Result<()> {
     Ok(())
 }
 
-fn process_stream(mut dedup: Deduplicator) -> io::Result<()> {
-    let mut buf = vec![0u8; READ_BUF_SIZE];
+fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
+    let mut buf = vec![0u8; buf_size];
     let mut leftover = 0usize;
     while let Some(n) = read(&mut buf[leftover..])? {
         let filled = leftover + n.get();
@@ -115,6 +118,6 @@ fn main() -> io::Result<()> {
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup),
-        Err(_) => process_stream(dedup),
+        Err(_) => process_stream(dedup, args.buf_size),
     }
 }

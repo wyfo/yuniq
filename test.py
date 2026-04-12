@@ -15,7 +15,7 @@ import unittest
 BINARY = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "target", "debug", "yuniq"
 )
-BUF_SIZE = 64 * 1024  # must match const BUF_SIZE in main.rs
+BUF_SIZE = 64 * 1024  # must match DEFAULT_BUF_SIZE in main.rs
 
 
 # ---------------------------------------------------------------------------
