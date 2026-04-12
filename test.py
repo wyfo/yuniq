@@ -131,6 +131,19 @@ class TestYuniq(unittest.TestCase):
         lines = [f"line{i}".encode() for i in range(5000)]
         self.check(b"\n".join(lines * 3) + b"\n")
 
+    def test_check_chars(self):
+        data = b"foobar\nfoobaz\nfoobar\nqux\n"
+        expected = b"foobar\nqux\n"
+        for run in [run_pipe, run_file]:
+            self.assertEqual(run(data, ["-w", "3"]), expected, run.__name__)
+
+    def test_check_chars_shorter_than_limit(self):
+        # lines shorter than -w limit should not panic and compare by full content
+        data = b"ab\nab\ncd\n"
+        expected = b"ab\ncd\n"
+        for run in [run_pipe, run_file]:
+            self.assertEqual(run(data, ["-w", "5"]), expected, run.__name__)
+
 
 # ---------------------------------------------------------------------------
 

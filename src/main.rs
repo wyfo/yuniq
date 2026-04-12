@@ -24,6 +24,9 @@ struct Args {
     /// Use 64-bit hashing (faster, negligible collision risk)
     #[arg(long)]
     fast: bool,
+    /// Only compare the first N characters of each line
+    #[arg(short = 'w', long)]
+    check_chars: Option<usize>,
 }
 
 fn write_all(mut slice: &[u8]) -> io::Result<()> {
@@ -47,18 +50,24 @@ fn read(buf: &mut [u8]) -> io::Result<Option<NonZero<usize>>> {
     Ok(NonZero::new(n as usize))
 }
 
-enum Deduplicator {
+enum DeduplicatorSeen {
     Fast(HashTable<u64>),
     Default(HashSet<u128>),
 }
 
+struct Deduplicator {
+    seen: DeduplicatorSeen,
+    check_chars: Option<usize>,
+}
+
 impl Deduplicator {
-    fn new(capacity: usize, fast: bool) -> Self {
-        if fast {
-            Self::Fast(HashTable::with_capacity(capacity))
+    fn new(capacity: usize, fast: bool, check_chars: Option<usize>) -> Self {
+        let seen = if fast {
+            DeduplicatorSeen::Fast(HashTable::with_capacity(capacity))
         } else {
-            Self::Default(HashSet::with_capacity(capacity))
-        }
+            DeduplicatorSeen::Default(HashSet::with_capacity(capacity))
+        };
+        Self { seen, check_chars }
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -68,8 +77,9 @@ impl Deduplicator {
             [l @ .., b'\n'] => l,
             l => l,
         };
-        match self {
-            Self::Fast(seen) => {
+        let key = (self.check_chars).map_or(key, |limit| &key[..limit.min(key.len())]);
+        match &mut self.seen {
+            DeduplicatorSeen::Fast(seen) => {
                 let hash = XxHash3_64::oneshot(key);
                 if seen.find(hash, |&k| k == hash).is_some() {
                     return true;
@@ -77,7 +87,7 @@ impl Deduplicator {
                 seen.insert_unique(hash, hash, |&k| k);
                 false
             }
-            Self::Default(seen) => !seen.insert(XxHash3_128::oneshot(key)),
+            DeduplicatorSeen::Default(seen) => !seen.insert(XxHash3_128::oneshot(key)),
         }
     }
 }
@@ -130,7 +140,7 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let dedup = Deduplicator::new(args.capacity, args.fast);
+    let dedup = Deduplicator::new(args.capacity, args.fast, args.check_chars);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup),
