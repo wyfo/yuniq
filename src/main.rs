@@ -70,20 +70,24 @@ impl DeduplicatorSeen {
 
 struct Deduplicator {
     seen: DeduplicatorSeen,
-    skip_chars: Option<usize>,
-    check_chars: Option<usize>,
+    skip_chars: Option<NonZero<usize>>,
+    check_chars: Option<NonZero<usize>>,
 }
 
 impl Deduplicator {
     #[allow(clippy::wrong_self_convention)]
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
-        let key = match line {
+        let mut key = match line {
             [l @ .., b'\r', b'\n'] => l,
             [l @ .., b'\n'] => l,
             l => l,
         };
-        let key = self.skip_chars.map_or(key, |n| &key[n.min(key.len())..]);
-        let key = self.check_chars.map_or(key, |n| &key[..n.min(key.len())]);
+        if let Some(skip) = self.skip_chars {
+            key = &key[skip.get().min(key.len())..];
+        }
+        if let Some(check) = self.check_chars {
+            key = &key[..check.get().min(key.len())];
+        }
         match &mut self.seen {
             DeduplicatorSeen::Fast(seen) => {
                 let hash = XxHash3_64::oneshot(key);
@@ -116,7 +120,7 @@ fn process_chunk(
         if dedup.is_duplicate(&data[pos..next]) {
             match writer.write_all(&data[write_start..pos]) {
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(None),
-                other => other?,
+                res => res?,
             }
             write_start = next;
         }
@@ -124,7 +128,7 @@ fn process_chunk(
     }
     match writer.write_all(&data[write_start..pos]) {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(None),
-        other => other.map(|_| Some(data.len() - pos)),
+        res => res.map(|_| Some(data.len() - pos)),
     }
 }
 
@@ -162,10 +166,19 @@ fn process_stream(
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    // Dumb case, no chars are checked, every line is a duplicate, so just print the first line.
+    if args.check_chars == Some(0) {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        return match io::stdout().write_all(line.as_bytes()) {
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
+            res => res,
+        };
+    }
     let dedup = Deduplicator {
         seen: DeduplicatorSeen::new(args.capacity, args.fast),
-        skip_chars: args.skip_chars,
-        check_chars: args.check_chars,
+        skip_chars: args.skip_chars.and_then(NonZero::new),
+        check_chars: args.check_chars.map(|c| NonZero::new(c).unwrap()),
     };
     let mut writer = io::BufWriter::new(RawStdout);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
@@ -175,6 +188,6 @@ fn main() -> io::Result<()> {
     }
     match writer.flush() {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
-        other => other,
+        res => res,
     }
 }

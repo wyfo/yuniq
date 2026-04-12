@@ -30,7 +30,7 @@ def run_file(data: str, extra_args: list[str] = None) -> str:
     args = [BINARY] + (extra_args or [])
     with tempfile.TemporaryFile() as f:
         f.write(data.encode())
-        f.flush()
+        f.seek(0)
         return subprocess.run(args, stdin=f, capture_output=True).stdout.decode()
 
 
@@ -121,6 +121,12 @@ class TestYuniq(unittest.TestCase):
     def test_check_chars_shorter_than_limit(self):
         # lines shorter than -w limit should not panic and compare by full content
         self.check("ab\nab\ncd\n", "ab\ncd\n", ["-w", "5"])
+
+    def test_check_chars_zero(self):
+        # -w 0: only the first line is emitted, regardless of duplicates
+        self.check("foo\nbar\nfoo\n", "foo\n", ["-w", "0"])
+        self.check("only\n", "only\n", ["-w", "0"])
+        self.check("", "", ["-w", "0"])
 
 
 # ---------------------------------------------------------------------------
