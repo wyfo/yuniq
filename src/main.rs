@@ -27,6 +27,9 @@ struct Args {
     /// Only compare the first N characters of each line
     #[arg(short = 'w', long)]
     check_chars: Option<usize>,
+    /// Skip the first N characters of each line before comparing
+    #[arg(short = 's', long)]
+    skip_chars: Option<usize>,
 }
 
 fn write_all(mut slice: &[u8]) -> io::Result<()> {
@@ -57,17 +60,27 @@ enum DeduplicatorSeen {
 
 struct Deduplicator {
     seen: DeduplicatorSeen,
+    skip_chars: Option<usize>,
     check_chars: Option<usize>,
 }
 
 impl Deduplicator {
-    fn new(capacity: usize, fast: bool, check_chars: Option<usize>) -> Self {
+    fn new(
+        capacity: usize,
+        fast: bool,
+        skip_chars: Option<usize>,
+        check_chars: Option<usize>,
+    ) -> Self {
         let seen = if fast {
             DeduplicatorSeen::Fast(HashTable::with_capacity(capacity))
         } else {
             DeduplicatorSeen::Default(HashSet::with_capacity(capacity))
         };
-        Self { seen, check_chars }
+        Self {
+            seen,
+            skip_chars,
+            check_chars,
+        }
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -77,7 +90,8 @@ impl Deduplicator {
             [l @ .., b'\n'] => l,
             l => l,
         };
-        let key = (self.check_chars).map_or(key, |limit| &key[..limit.min(key.len())]);
+        let key = self.skip_chars.map_or(key, |n| &key[n.min(key.len())..]);
+        let key = self.check_chars.map_or(key, |n| &key[..n.min(key.len())]);
         match &mut self.seen {
             DeduplicatorSeen::Fast(seen) => {
                 let hash = XxHash3_64::oneshot(key);
@@ -140,7 +154,7 @@ fn process_stream(mut dedup: Deduplicator, buf_size: usize) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let dedup = Deduplicator::new(args.capacity, args.fast, args.check_chars);
+    let dedup = Deduplicator::new(args.capacity, args.fast, args.skip_chars, args.check_chars);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     match unsafe { MmapOptions::new().map(&io::stdin().lock()) } {
         Ok(mmap) => process_mmap(&mmap, dedup),
