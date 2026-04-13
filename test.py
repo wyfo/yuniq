@@ -43,7 +43,7 @@ class TestYuniq(unittest.TestCase):
     def check(self, data: str, expected: str, extra_args: list[str] = None) -> None:
         """Assert both pipe and mmap outputs equal expected, with and without --fast."""
         for run in (run_pipe, run_file):
-            for args in ([], ["--fast"], ["--safe"]):
+            for args in ([], ["--fast"]):
                 self.assertEqual(run(data, args + (extra_args or [])), expected, f"{run.__name__}{args}")
 
     def check_count(self, data: str, expected: str, extra_args: list[str] = None) -> None:
@@ -154,16 +154,18 @@ class TestYuniq(unittest.TestCase):
         self.check("ts1 xx rest\nts2 yy rest\nts1 xx other\n", "ts1 xx rest\nts1 xx other\n", ["-f", "1", "-s", "3"])
 
     def test_count_basic(self):
-        self.check_count("a\nb\na\nc\na\n", "      3 a\n      1 b\n      1 c\n")
+        # -c sorts ascending by default
+        self.check_count("a\nb\na\nc\na\n", "1\tb\n1\tc\n3\ta\n")
 
     def test_count_order_preserved(self):
-        self.check_count("b\na\nb\n", "      2 b\n      1 a\n")
+        # -S disables sorting, output is insertion order
+        self.check_count("b\na\nb\n", "2\tb\n1\ta\n", ["-S"])
 
     def test_count_all_unique(self):
-        self.check_count("x\ny\nz\n", "      1 x\n      1 y\n      1 z\n")
+        self.check_count("x\ny\nz\n", "1\tx\n1\ty\n1\tz\n")
 
     def test_count_all_same(self):
-        self.check_count("x\nx\nx\n", "      3 x\n")
+        self.check_count("x\nx\nx\n", "3\tx\n")
 
     def test_count_empty(self):
         self.check_count("", "")
@@ -171,32 +173,37 @@ class TestYuniq(unittest.TestCase):
     def test_count_no_trailing_newline_dup(self):
         # last line is a dup of an earlier newline-terminated occurrence;
         # output uses the stored pointer (with \n)
-        self.check_count("a\nb\na\nb", "      2 a\n      2 b\n")
+        self.check_count("a\nb\na\nb", "2\ta\n2\tb\n")
 
     def test_count_no_trailing_newline_unique(self):
-        # last line is unique and unterminated — output must preserve the missing \n
-        self.check_count("a\na\nb", "      2 a\n      1 b")
+        # sorting moves the unterminated line away from the end; a \n is added
+        self.check_count("a\na\nb", "1\tb\n2\ta\n")
 
     def test_count_check_chars(self):
         # -w 3: "foobar" and "foobaz" share the same 3-char key "foo"
-        self.check_count("foobar\nfoobaz\nqux\n", "      2 foobar\n      1 qux\n", ["-w", "3"])
+        self.check_count("foobar\nfoobaz\nqux\n", "1\tqux\n2\tfoobar\n", ["-w", "3"])
 
     def test_count_skip_fields(self):
         # -f 1: skip first field, "foo" is the common key for ts1/ts2 lines
-        self.check_count("ts1 foo\nts2 foo\nts1 bar\n", "      2 ts1 foo\n      1 ts1 bar\n", ["-f", "1"])
+        self.check_count("ts1 foo\nts2 foo\nts1 bar\n", "1\tts1 bar\n2\tts1 foo\n", ["-f", "1"])
 
     def test_sort_ascending(self):
-        self.check_count("a\nb\na\nc\na\nb\n", "      1 c\n      2 b\n      3 a\n", ["-S"])
+        # default sort is ascending
+        self.check_count("a\nb\na\nc\na\nb\n", "1\tc\n2\tb\n3\ta\n")
 
     def test_sort_descending(self):
-        self.check_count("a\nb\na\nc\na\nb\n", "      3 a\n      2 b\n      1 c\n", ["-S", "-r"])
+        self.check_count("a\nb\na\nc\na\nb\n", "3\ta\n2\tb\n1\tc\n", ["-r"])
 
     def test_sort_stable_ties(self):
         # equal counts preserve first-seen order
-        self.check_count("b\na\nb\na\n", "      2 b\n      2 a\n", ["-S"])
+        self.check_count("b\na\nb\na\n", "2\tb\n2\ta\n")
 
     def test_sort_already_ordered(self):
-        self.check_count("c\nb\nb\na\na\na\n", "      1 c\n      2 b\n      3 a\n", ["-S"])
+        self.check_count("c\nb\nb\na\na\na\n", "1\tc\n2\tb\n3\ta\n")
+
+    def test_no_sort(self):
+        # -S preserves insertion order
+        self.check_count("a\nb\na\nc\na\nb\n", "3\ta\n2\tb\n1\tc\n", ["-S"])
 
 
 # ---------------------------------------------------------------------------

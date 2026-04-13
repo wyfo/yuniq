@@ -1,16 +1,17 @@
 use std::{
+    hash::{BuildHasher, Hash, Hasher},
     hint::assert_unchecked,
     io::{self, ErrorKind, Write},
     mem::MaybeUninit,
     num::NonZero,
+    ops::Deref,
     ptr::NonNull,
 };
 
 use clap::Parser;
-use hashbrown::{HashSet, HashTable, hash_table::Entry};
+use hashbrown::{HashMap, HashSet, HashTable, hash_map, hash_set, hash_table};
 use memchr::{memchr, memchr2};
 use memmap2::Mmap;
-use twox_hash::{XxHash3_64, XxHash3_128};
 
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
 const READ_BUF_SIZE: usize = 64 * 1024;
@@ -24,17 +25,20 @@ struct Args {
     /// Use 64-bit hashing (faster, negligible collision risk)
     #[arg(long)]
     fast: bool,
-    /// Store exact line bytes for collision-free deduplication (slower)
-    #[arg(long, alias = "slow", conflicts_with = "fast")]
-    safe: bool,
-    /// Prefix each line with its global occurrence count
-    #[arg(short = 'c', long, conflicts_with_all = ["fast", "safe"])]
+    /// Prefix each line with its global occurrence count, sorted by count
+    #[arg(short = 'c', long, conflicts_with_all = ["fast"])]
     count: bool,
-    /// Sort output by count (requires --count)
+    /// Preserve insertion order instead of sorting by count (requires --count)
     #[arg(short = 'S', long, requires = "count")]
-    sort: bool,
-    /// Reverse sort order (requires --sort)
-    #[arg(short = 'r', long, requires = "sort")]
+    no_sort: bool,
+    /// Reverse sort order (requires --count, incompatible with --no-sort)
+    #[arg(
+        short = 'r',
+        long,
+        alias = "rev",
+        requires = "count",
+        conflicts_with = "no_sort"
+    )]
     reverse: bool,
     /// Only compare the first N characters of each line
     #[arg(short = 'w', long)]
@@ -48,6 +52,8 @@ struct Args {
 }
 
 fn read(buf: &mut [MaybeUninit<u8>]) -> io::Result<Option<NonZero<usize>>> {
+    // SAFETY: `STDIN_FILENO` is a valid open fd; `buf` is a valid writable region
+    // of `buf.len()` bytes; uninitialized memory is acceptable as the read target.
     match unsafe { libc::read(libc::STDIN_FILENO, buf.as_mut_ptr().cast(), buf.len()) } {
         n if n >= 0 => Ok(NonZero::new(n as usize)),
         _ => Err(io::Error::last_os_error()),
@@ -57,6 +63,8 @@ fn read(buf: &mut [MaybeUninit<u8>]) -> io::Result<Option<NonZero<usize>>> {
 struct RawStdout;
 impl Write for RawStdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // SAFETY: `STDOUT_FILENO` is a valid open fd; `buf` is a valid readable
+        // region of `buf.len()` initialized bytes.
         match unsafe { libc::write(libc::STDOUT_FILENO, buf.as_ptr().cast(), buf.len()) } {
             n if n >= 0 => Ok(n as usize),
             _ => Err(io::Error::last_os_error()),
@@ -67,46 +75,85 @@ impl Write for RawStdout {
     }
 }
 
+// A byte-slice pointer whose referent is kept alive by the `buffers` vec of the
+// enclosing `DeduplicatorSeen`. Every `UnsafeSlice` must not outlive the buffer
+// it was created from.
+#[derive(Clone, Copy)]
+struct UnsafeSlice(NonNull<[u8]>);
+impl UnsafeSlice {
+    // SAFETY: `slice` must outlive the returned `UnsafeSlice`. Callers ensure
+    // this by archiving the owning buffer into `buffers` before it can be dropped.
+    unsafe fn new(slice: &[u8]) -> Self {
+        Self(slice.into())
+    }
+}
+impl Deref for UnsafeSlice {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: constructed from a valid `&[u8]`; the owning buffer in
+        // `DeduplicatorSeen::buffers` is kept alive for the lifetime of self.
+        unsafe { self.0.as_ref() }
+    }
+}
+impl PartialEq for UnsafeSlice {
+    fn eq(&self, other: &UnsafeSlice) -> bool {
+        **self == **other
+    }
+}
+impl Eq for UnsafeSlice {}
+impl Hash for UnsafeSlice {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Call `write` directly rather than delegating to `<[u8] as Hash>`,
+        // which would prepend the length. Skipping it is correct here because
+        // we hash single values, not sequences, so the length prefix adds no
+        // disambiguation benefit and just wastes a few cycles.
+        state.write(self);
+    }
+}
+
 enum DeduplicatorSeen {
-    // The hash itself is stored as the value; a hash collision is treated as a
-    // duplicate (false positive). The collision risk grows with the number of
-    // distinct lines but remains low given XxHash3_64's 64-bit output space.
-    Fast(HashTable<u64>),
-    // 128-bit hash makes collisions negligible without storing the raw bytes.
-    Default(HashSet<u128>),
-    Safe {
-        // Each NonNull<[u8]> points into one of the owned `buffers` vecs below.
-        // The table must not outlive those vecs.
-        table: HashTable<(u64, NonNull<[u8]>)>,
+    // Only the hash is stored; a collision is treated as a duplicate (false
+    // positive). `foldhash::quality` is used over `foldhash::fast` to keep the
+    // collision probability low — the throughput difference is not measurable.
+    Fast {
+        table: HashTable<u64>,
+        hash_state: foldhash::quality::RandomState,
+    },
+    // Each UnsafeSlice points into one of the owned `buffers` vecs below.
+    // The set must not outlive those vecs.
+    Default {
+        set: HashSet<UnsafeSlice>,
         buffers: Vec<Vec<u8>>,
     },
+    // `map` stores the key (line without trailing newline) → index into `order`.
+    // `order` stores the full line (with newline) and its running count, in
+    // first-seen order, so we can emit insertion-order output without sorting.
+    // Both UnsafeSlices point into the owned `buffers` vecs below.
     Count {
-        // (hash, key_ptr, order_idx): key_ptr for equality, order_idx for O(1) count increment.
-        // Both pointers refer into the owned `buffers` vecs below.
-        table: HashTable<(u64, NonNull<[u8]>, usize)>,
-        // First-seen order: (full_line_ptr, total_count). Written out at the end.
-        order: Vec<(NonNull<[u8]>, u64)>,
+        map: HashMap<UnsafeSlice, usize>,
+        order: Vec<(UnsafeSlice, u64)>,
         buffers: Vec<Vec<u8>>,
     },
 }
 
 impl DeduplicatorSeen {
-    fn new(capacity: usize, fast: bool, safe: bool, count: bool) -> Self {
+    fn new(capacity: usize, fast: bool, count: bool) -> Self {
         if count {
             Self::Count {
-                table: HashTable::with_capacity(capacity),
+                map: HashMap::with_capacity(capacity),
                 order: Vec::new(),
                 buffers: Vec::new(),
             }
-        } else if safe {
-            Self::Safe {
+        } else if fast {
+            Self::Fast {
                 table: HashTable::with_capacity(capacity),
+                hash_state: Default::default(),
+            }
+        } else {
+            Self::Default {
+                set: HashSet::with_capacity(capacity),
                 buffers: Vec::new(),
             }
-        } else if fast {
-            Self::Fast(HashTable::with_capacity(capacity))
-        } else {
-            Self::Default(HashSet::with_capacity(capacity))
         }
     }
 }
@@ -125,7 +172,7 @@ impl Deduplicator {
         let check_chars = args.check_chars.map(|c| NonZero::new(c).unwrap());
         let skip_fields = args.skip_fields.and_then(NonZero::new);
         Self {
-            seen: DeduplicatorSeen::new(args.size_hint, args.fast, args.safe, args.count),
+            seen: DeduplicatorSeen::new(args.size_hint, args.fast, args.count),
             has_filter: skip_chars.is_some() || check_chars.is_some() || skip_fields.is_some(),
             skip_chars,
             check_chars,
@@ -161,40 +208,46 @@ impl Deduplicator {
             }
         }
         match &mut self.seen {
-            DeduplicatorSeen::Fast(table) => {
-                let hash = XxHash3_64::oneshot(key);
+            DeduplicatorSeen::Fast { table, hash_state } => {
+                let mut hasher = hash_state.build_hasher();
+                // Write raw bytes directly, same reasoning as `UnsafeSlice::hash`.
+                hasher.write(key);
+                let hash = hasher.finish();
                 match table.entry(hash, |h| *h == hash, |h| *h) {
-                    Entry::Occupied(_) => true,
-                    Entry::Vacant(entry) => {
+                    hash_table::Entry::Occupied(_) => true,
+                    hash_table::Entry::Vacant(entry) => {
                         entry.insert(hash);
                         false
                     }
                 }
             }
-            DeduplicatorSeen::Default(set) => !set.insert(XxHash3_128::oneshot(key)),
-            DeduplicatorSeen::Safe { table, .. } => {
-                let hash = XxHash3_64::oneshot(key);
-                match table.entry(hash, |(_, k)| unsafe { k.as_ref() } == key, |(h, _)| *h) {
-                    Entry::Occupied(_) => true,
-                    Entry::Vacant(entry) => {
-                        entry.insert((hash, key.into()));
+            DeduplicatorSeen::Default { set, .. } => {
+                // SAFETY: `key` is a subslice of the current chunk in `buf`;
+                // `buf` is archived into `buffers` before it can be dropped.
+                match set.entry(unsafe { UnsafeSlice::new(key) }) {
+                    hash_set::Entry::Occupied(_) => true,
+                    hash_set::Entry::Vacant(entry) => {
+                        entry.insert();
                         false
                     }
                 }
             }
-            DeduplicatorSeen::Count { table, order, .. } => {
-                let hash = XxHash3_64::oneshot(key);
-                match table.entry(hash, |(_, k, _)| unsafe { k.as_ref() } == key, |(h, ..)| *h) {
-                    Entry::Occupied(entry) => {
-                        let idx = entry.get().2;
-                        // SAFETY: idx was set to order.len() at insertion time, so it is in bounds.
-                        unsafe { order.get_unchecked_mut(idx) }.1 += 1;
+            DeduplicatorSeen::Count { map, order, .. } => {
+                // SAFETY: `key` is a subslice of the current chunk in `buf`;
+                // `buf` is archived into `buffers` before it can be dropped.
+                match map.entry(unsafe { UnsafeSlice::new(key) }) {
+                    hash_map::Entry::Occupied(entry) => {
+                        // SAFETY: the index was set to `order.len()` at insertion
+                        // time and `order` only grows, so it is always in bounds.
+                        unsafe { order.get_unchecked_mut(*entry.get()) }.1 += 1;
                         true
                     }
-                    Entry::Vacant(entry) => {
+                    hash_map::Entry::Vacant(entry) => {
                         let idx = order.len();
-                        entry.insert((hash, key.into(), idx));
-                        order.push((line.into(), 1));
+                        entry.insert(idx);
+                        // SAFETY: same as the `key` above — `line` is a subslice
+                        // of `buf` which is archived into `buffers` before drop.
+                        order.push((unsafe { UnsafeSlice::new(line) }, 1));
                         false
                     }
                 }
@@ -204,7 +257,7 @@ impl Deduplicator {
 
     fn buffers(&mut self) -> Option<&mut Vec<Vec<u8>>> {
         match &mut self.seen {
-            DeduplicatorSeen::Safe { buffers, .. } => Some(buffers),
+            DeduplicatorSeen::Default { buffers, .. } => Some(buffers),
             DeduplicatorSeen::Count { buffers, .. } => Some(buffers),
             _ => None,
         }
@@ -217,7 +270,7 @@ impl Deduplicator {
         reverse: bool,
     ) -> io::Result<()> {
         let DeduplicatorSeen::Count { order, .. } = &mut self.seen else {
-            return Ok(());
+            unreachable!()
         };
         if sort {
             if reverse {
@@ -226,10 +279,14 @@ impl Deduplicator {
                 order.sort_by_key(|&(_, count)| count);
             }
         }
-        for &(ptr, count) in order.iter() {
-            write!(writer, "{:>7} ", count)?;
-            // SAFETY: ptr points into self.buffers which are alive for the duration of self.
-            writer.write_all(unsafe { ptr.as_ref() })?;
+        let mut buf = itoa::Buffer::new();
+        for &(line, count) in order.iter() {
+            writer.write_all(buf.format(count).as_bytes())?;
+            writer.write_all(b"\t")?;
+            writer.write_all(&line)?;
+            if !line.ends_with(b"\n") {
+                writer.write_all(b"\n")?;
+            }
         }
         Ok(())
     }
@@ -282,6 +339,8 @@ fn process_stream(dedup: &mut Deduplicator, writer: &mut dyn Write) -> io::Resul
     // hand ownership of the buffer to the deduplicator once it's full.
     let mut buf = Vec::with_capacity(READ_BUF_SIZE);
     while let Some(n) = read(buf.spare_capacity_mut())? {
+        // SAFETY: `read()` writes exactly `n` bytes into the spare capacity;
+        // `buf.len() + n` does not exceed `buf.capacity()` by construction.
         unsafe { buf.set_len(buf.len() + n.get()) };
         let processed = process_chunk(&buf, dedup, false, writer)?;
         // `processed < buf.len()` means the last line had no newline yet; keep
@@ -342,7 +401,7 @@ fn deduplicate(args: Args) -> io::Result<()> {
         None => process_stream(&mut dedup, write)?,
     }
     if args.count {
-        dedup.write_counts(&mut writer, args.sort, args.reverse)?;
+        dedup.write_counts(&mut writer, !args.no_sort, args.reverse)?;
     }
     // Prevent mmap to be dropped before writing the counts
     drop(mmap);
