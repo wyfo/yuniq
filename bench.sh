@@ -27,21 +27,18 @@ if [ $# -gt 0 ] && { [ "$1" = "dedup" ] || [ "$1" = "count" ]; }; then
     shift
 fi
 
+# ── generate missing data files ───────────────────────────────────────────────
+if [ -z "$(ls -A "$BENCH_DATA" 2>/dev/null)" ]; then
+    echo "Benchmark data missing — generating..."
+    python3 "$SCRIPT_DIR/bench_data.py"
+    echo ""
+fi
+
+# ── file list ─────────────────────────────────────────────────────────────────
 if [ $# -gt 0 ]; then
     FILES=("$@")
 else
     FILES=("$BENCH_DATA"/*.txt)
-fi
-
-# ── generate missing data files ───────────────────────────────────────────────
-missing=0
-for file in "${FILES[@]}"; do
-    [ -f "$file" ] || { missing=1; break; }
-done
-if [ "$missing" = "1" ]; then
-    echo "Some data files are missing — regenerating..."
-    python3 "$SCRIPT_DIR/bench_data.py"
-    echo ""
 fi
 
 # ── benchmarks ───────────────────────────────────────────────────────────────
@@ -50,6 +47,7 @@ for file in "${FILES[@]}"; do
     echo "━━━ $name ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     # ── dedup ────────────────────────────────────────────────────────────────
+    echo "$YUNIQ                < $file > /dev/null"
     if [ "$RUN_DEDUP" = "1" ]; then
     echo "[dedup] $name"
     hyperfine \
