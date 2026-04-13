@@ -19,18 +19,12 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 #[derive(Parser)]
 #[command(about = "Hyperfast line deduplicator")]
 struct Args {
-    /// Expected number of unique lines (used to pre-size internal structures)
-    #[arg(long, default_value_t = DEFAULT_CAPACITY)]
-    size_hint: usize,
     /// Use 64-bit hashing (faster, negligible collision risk)
     #[arg(long)]
     fast: bool,
     /// Prefix each line with its global occurrence count, sorted by count
     #[arg(short = 'c', long, conflicts_with_all = ["fast"])]
     count: bool,
-    /// Preserve insertion order instead of sorting by count (requires --count)
-    #[arg(short = 'S', long, requires = "count")]
-    no_sort: bool,
     /// Reverse sort order (requires --count, incompatible with --no-sort)
     #[arg(
         short = 'r',
@@ -40,6 +34,12 @@ struct Args {
         conflicts_with = "no_sort"
     )]
     reverse: bool,
+    /// Preserve insertion order instead of sorting by count (requires --count)
+    #[arg(short = 'S', long, requires = "count")]
+    no_sort: bool,
+    /// Expected number of unique lines (used to pre-size internal structures)
+    #[arg(long, default_value_t = DEFAULT_CAPACITY)]
+    size_hint: usize,
     /// Only compare the first N characters of each line
     #[arg(short = 'w', long)]
     check_chars: Option<usize>,
