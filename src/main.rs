@@ -1,6 +1,5 @@
 use std::{
     hash::{BuildHasher, Hash, Hasher},
-    hint::assert_unchecked,
     io::{self, ErrorKind, Write},
     mem::MaybeUninit,
     num::NonZero,
@@ -303,7 +302,9 @@ fn process_chunk(
     // one write, then skip the duplicate by advancing write_start past it.
     let mut write_start = 0;
     loop {
-        let nl = match memchr(b'\n', &data[pos..]) {
+        // SAFETY: both `nl == data.len()` branches at the end either returned or broke,
+        // so `nl < data.len()` here, therefore `pos = nl + 1 <= data.len()`.
+        let nl = match memchr(b'\n', unsafe { data.get_unchecked(pos..) }) {
             Some(off) => pos + off,
             // No newline found: if this is the final chunk and bytes remain,
             // use `data.len()` as a virtual newline position. The `nl == data.len()`
@@ -314,11 +315,10 @@ fn process_chunk(
             None => break,
         };
         // SAFETY: `nl` is either `pos + newline_offset` (bounded by `data.len() - 1`)
-        // or `data.len()` (virtual newline); `write_start` only moves forward to a
-        // previous `pos` value, so it never exceeds `pos`.
-        unsafe { assert_unchecked(nl <= data.len() && write_start <= pos) };
-        if dedup.is_duplicate(&data[pos..nl]) {
-            writer.write_all(&data[write_start..pos])?;
+        // or `data.len()` (virtual newline);
+        if dedup.is_duplicate(unsafe { data.get_unchecked(pos..nl) }) {
+            // SAFETY: `write_start` only moves forward to a previous `pos` value, so it never exceeds `pos`
+            writer.write_all(unsafe { data.get_unchecked(write_start..pos) })?;
             if nl == data.len() {
                 debug_assert!(is_final);
                 return Ok(nl);
@@ -330,16 +330,11 @@ fn process_chunk(
             break;
         }
         pos = nl + 1;
-        // SAFETY: both `nl == data.len()` branches above either returned or broke,
-        // so `nl < data.len()` here, therefore `pos = nl + 1 <= data.len()`.
-        unsafe { assert_unchecked(pos <= data.len()) };
     }
-    // Help the compiler to remove bound checks by making invariants explicit.
+    // Flush the trailing run of unique lines not yet written.
     // SAFETY: the loop only advances pos forward and breaks before data.len();
     // write_start <= pos because it only moves to next, which was pos's prior value.
-    unsafe { assert_unchecked(pos <= data.len() && write_start <= pos) };
-    // Flush the trailing run of unique lines not yet written.
-    writer.write_all(&data[write_start..pos])?;
+    writer.write_all(unsafe { data.get_unchecked(write_start..pos) })?;
     Ok(pos)
 }
 
