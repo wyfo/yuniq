@@ -184,23 +184,7 @@ impl Deduplicator {
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
         let mut key = line;
         if self.has_filter {
-            if let Some(n) = self.skip_fields {
-                for _ in 0..n.get() {
-                    let is_blank = |&b| b != b' ' && b != b'\t';
-                    let i = key.iter().position(is_blank).unwrap_or(key.len());
-                    key = &key[i..];
-                    let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
-                    // SAFETY: memchr2 returns an index within `key`, but the
-                    // compiler cannot prove it.
-                    key = unsafe { key.get_unchecked(i..) };
-                }
-            }
-            if let Some(skip) = self.skip_chars {
-                key = &key[skip.get().min(key.len())..];
-            }
-            if let Some(check) = self.check_chars {
-                key = &key[..check.get().min(key.len())];
-            }
+            key = self.filter_key(key);
         }
         match &mut self.seen {
             DeduplicatorSeen::Fast { table, hash_state } => {
@@ -248,6 +232,28 @@ impl Deduplicator {
                 }
             }
         }
+    }
+
+    #[cold]
+    fn filter_key<'a>(&self, mut key: &'a [u8]) -> &'a [u8] {
+        if let Some(n) = self.skip_fields {
+            for _ in 0..n.get() {
+                let is_blank = |&b| b != b' ' && b != b'\t';
+                let i = key.iter().position(is_blank).unwrap_or(key.len());
+                key = &key[i..];
+                let i = memchr2(b' ', b'\t', key).unwrap_or(key.len());
+                // SAFETY: memchr2 returns an index within `key`, but the
+                // compiler cannot prove it.
+                key = unsafe { key.get_unchecked(i..) };
+            }
+        }
+        if let Some(skip) = self.skip_chars {
+            key = &key[skip.get().min(key.len())..];
+        }
+        if let Some(check) = self.check_chars {
+            key = &key[..check.get().min(key.len())];
+        }
+        key
     }
 
     fn buffers(&mut self) -> Option<&mut Vec<Vec<u8>>> {
