@@ -10,7 +10,7 @@ keywords = ["cli", "uniq", "xxhash", "dedup"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-bumpalo = "3.20.2"
+bumpalo = { version = "3.20.2", features = ["collections"] }
 clap = { version = "4.6.0", features = ["derive"] }
 foldhash = "0.1.5"
 hashbrown = "0.17.0"

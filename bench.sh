@@ -59,7 +59,6 @@ for file in "${FILES[@]}"; do
         -n "yuniq --lean"        "$YUNIQ --lean          < $file > /dev/null" \
         -n "yuniq (pipe)"        "cat $file | $YUNIQ              > /dev/null" \
         -n "yuniq --fast (pipe)" "cat $file | $YUNIQ --fast       > /dev/null" \
-        -n "yuniq --lean (pipe)" "cat $file | $YUNIQ --lean       > /dev/null" \
         -n "xuniq"               "xuniq                  < $file > /dev/null" \
         -n "xuniq --safe"        "xuniq --safe            < $file > /dev/null" \
         -n "hist -u"             "hist -u                < $file > /dev/null" \
@@ -78,7 +77,6 @@ for file in "${FILES[@]}"; do
         -n "yuniq -c"               "$YUNIQ -c               < $file > /dev/null" \
         -n "yuniq -c --lean"        "$YUNIQ -c --lean         < $file > /dev/null" \
         -n "yuniq -c (pipe)"        "cat $file | $YUNIQ -c              > /dev/null" \
-        -n "yuniq -c --lean (pipe)" "cat $file | $YUNIQ -c --lean       > /dev/null" \
         -n "hist"                   "hist                    < $file > /dev/null" \
         -n "huniq -cs"              "huniq -cs               < $file > /dev/null" \
         -n "cuniq -cs"              "cuniq -cs               < $file > /dev/null"
