@@ -18,7 +18,7 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 #[derive(Parser)]
 #[command(about = "Hyperfast line deduplicator")]
 struct Args {
-    /// Use 64-bit hashing (faster, negligible collision risk)
+    /// Use 64-bit hashing only (2-3x faster, negligible collision risk, but still unsafe)
     #[arg(long)]
     fast: bool,
     /// Prefix each line with its global occurrence count, sorted by count
