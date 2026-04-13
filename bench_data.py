@@ -18,7 +18,7 @@ POOL_CAP = 50_000   # max pool size to keep memory reasonable
 CHARS = string.ascii_lowercase + string.digits
 OUTDIR = "bench_data"
 
-DUP_RATES = [0.10, 0.50, 0.80]
+DUP_RATES = [0.00, 0.10, 0.50, 0.80]
 LEN_RANGES = [(1, 10), (10, 50), (50, 200)]
 
 
