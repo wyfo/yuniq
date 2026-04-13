@@ -1,22 +1,36 @@
 use std::{
-    hash::{BuildHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     io::{self, ErrorKind, Write},
     num::NonZero,
 };
 
 use bumpalo::{Bump, collections::Vec as BVec};
 use clap::Parser;
-use hashbrown::{HashMap, HashSet, HashTable, hash_map, hash_set, hash_table};
+use getrandom::fill as getrandom_fill;
+use hashbrown::{HashMap, HashSet, hash_map, hash_set};
 use memchr::{memchr, memchr2};
 use memmap2::Mmap;
+use twox_hash::xxhash3_128;
 
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
 const READ_BUF_SIZE: usize = 64 * 1024;
 
+fn random_seed() -> u64 {
+    let mut buf = [0u8; 8];
+    getrandom_fill(&mut buf).expect("failed to generate random seed");
+    u64::from_ne_bytes(buf)
+}
+
+fn random_secret() -> Box<[u8]> {
+    let mut secret = vec![0u8; xxhash3_128::DEFAULT_SECRET_LENGTH];
+    getrandom_fill(&mut secret).expect("failed to generate random secret");
+    secret.into_boxed_slice()
+}
+
 #[derive(Parser)]
 #[command(about = "Hyperfast line deduplicator")]
 struct Args {
-    /// Use 64-bit hashing only (2-3x faster, negligible collision risk, but still unsafe)
+    /// Use 128-bit hashing only (lower memory consumption, negligible collision risk)
     #[arg(long)]
     fast: bool,
     /// Reduce memory footprint by only retaining unique lines instead of buffering
@@ -157,12 +171,13 @@ impl Arena {
 }
 
 enum DeduplicatorSeen<'arena> {
-    // Only the hash is stored; a collision is treated as a duplicate (false
-    // positive). `foldhash::quality` is used over `foldhash::fast` to keep the
-    // collision probability low — the throughput difference is not measurable.
+    // Only the 128-bit XXHash3 digest is stored; a collision is treated as a
+    // duplicate (false positive). The seed and secret are randomly generated
+    // at startup.
     Fast {
-        table: HashTable<u64>,
-        hash_state: foldhash::quality::RandomState,
+        set: HashSet<u128>,
+        seed: u64,
+        secret: Box<[u8]>,
     },
     // Each LineKey<'arena> borrows from either an archived arena-backed buffer
     // (non-lean) or a fresh arena allocation (lean). Both live for 'arena.
@@ -188,8 +203,9 @@ impl<'arena> DeduplicatorSeen<'arena> {
             }
         } else if fast {
             Self::Fast {
-                table: HashTable::with_capacity(capacity),
-                hash_state: Default::default(),
+                set: HashSet::with_capacity(capacity),
+                seed: random_seed(),
+                secret: random_secret(),
             }
         } else {
             Self::Default {
@@ -202,18 +218,13 @@ impl<'arena> DeduplicatorSeen<'arena> {
     /// emitted), or `false` if it is a duplicate.
     fn insert(&mut self, key: LineKey<'arena>, line: &'arena [u8]) -> bool {
         match self {
-            DeduplicatorSeen::Fast { table, hash_state } => {
-                let mut hasher = hash_state.build_hasher();
+            DeduplicatorSeen::Fast { set, seed, secret } => {
                 // Write raw bytes directly, same reasoning as `LineKey::hash`.
-                hasher.write(key.0);
-                let hash = hasher.finish();
-                match table.entry(hash, |h| *h == hash, |h| *h) {
-                    hash_table::Entry::Occupied(_) => false,
-                    hash_table::Entry::Vacant(entry) => {
-                        entry.insert(hash);
-                        true
-                    }
-                }
+                // SAFETY: secret is always DEFAULT_SECRET_LENGTH (192) bytes,
+                // which exceeds SECRET_MINIMUM_LENGTH (136).
+                let hash = xxhash3_128::Hasher::oneshot_with_seed_and_secret(*seed, secret, key.0)
+                    .expect("secret length is always valid");
+                set.insert(hash)
             }
             DeduplicatorSeen::Default { set } => match set.entry(key) {
                 hash_set::Entry::Occupied(_) => false,

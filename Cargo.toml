@@ -12,8 +12,9 @@ categories = ["command-line-utilities"]
 [dependencies]
 bumpalo = { version = "3.20.2", features = ["collections"] }
 clap = { version = "4.6.0", features = ["derive"] }
-foldhash = "0.1.5"
+getrandom = "0.3"
 hashbrown = "0.17.0"
+twox-hash = "2"
 itoa = "1.0.18"
 libc = "0.2.184"
 memchr = "2.8.0"
