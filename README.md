@@ -12,9 +12,10 @@ Hyperfast line deduplicator
 Usage: yuniq [OPTIONS]
 
 Options:
-  -c, --capacity <CAPACITY>        Expected number of lines [default: 1048576]
+      --size-hint <SIZE_HINT>      Expected number of unique lines (used to pre-size internal structures) [default: 1048576]
       --fast                       Use 64-bit hashing (faster, negligible collision risk)
       --safe                       Store exact line bytes for collision-free deduplication (slower)
+  -c, --count                      Prefix each line with its global occurrence count
   -w, --check-chars <CHECK_CHARS>  Only compare the first N characters of each line
   -s, --skip-chars <SKIP_CHARS>    Skip the first N characters of each line before comparing
   -f, --skip-fields <SKIP_FIELDS>  Skip the first N whitespace-delimited fields of each line before comparing

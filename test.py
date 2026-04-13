@@ -46,6 +46,11 @@ class TestYuniq(unittest.TestCase):
             for args in ([], ["--fast"], ["--safe"]):
                 self.assertEqual(run(data, args + (extra_args or [])), expected, f"{run.__name__}{args}")
 
+    def check_count(self, data: str, expected: str, extra_args: list[str] = None) -> None:
+        """Assert -c output for both pipe and mmap paths."""
+        for run in (run_pipe, run_file):
+            self.assertEqual(run(data, ["-c"] + (extra_args or [])), expected, run.__name__)
+
     def test_basic_dedup(self):
         self.check("foo\nbar\nfoo\nbaz\nbar\n", "foo\nbar\nbaz\n")
 
@@ -147,6 +152,38 @@ class TestYuniq(unittest.TestCase):
     def test_skip_fields_with_skip_chars(self):
         # -f 1 skips first field, then -s 3 skips 3 more chars of the remainder
         self.check("ts1 xx rest\nts2 yy rest\nts1 xx other\n", "ts1 xx rest\nts1 xx other\n", ["-f", "1", "-s", "3"])
+
+    def test_count_basic(self):
+        self.check_count("a\nb\na\nc\na\n", "      3 a\n      1 b\n      1 c\n")
+
+    def test_count_order_preserved(self):
+        self.check_count("b\na\nb\n", "      2 b\n      1 a\n")
+
+    def test_count_all_unique(self):
+        self.check_count("x\ny\nz\n", "      1 x\n      1 y\n      1 z\n")
+
+    def test_count_all_same(self):
+        self.check_count("x\nx\nx\n", "      3 x\n")
+
+    def test_count_empty(self):
+        self.check_count("", "")
+
+    def test_count_no_trailing_newline_dup(self):
+        # last line is a dup of an earlier newline-terminated occurrence;
+        # output uses the stored pointer (with \n)
+        self.check_count("a\nb\na\nb", "      2 a\n      2 b\n")
+
+    def test_count_no_trailing_newline_unique(self):
+        # last line is unique and unterminated — output must preserve the missing \n
+        self.check_count("a\na\nb", "      2 a\n      1 b")
+
+    def test_count_check_chars(self):
+        # -w 3: "foobar" and "foobaz" share the same 3-char key "foo"
+        self.check_count("foobar\nfoobaz\nqux\n", "      2 foobar\n      1 qux\n", ["-w", "3"])
+
+    def test_count_skip_fields(self):
+        # -f 1: skip first field, "foo" is the common key for ts1/ts2 lines
+        self.check_count("ts1 foo\nts2 foo\nts1 bar\n", "      2 ts1 foo\n      1 ts1 bar\n", ["-f", "1"])
 
 
 # ---------------------------------------------------------------------------
