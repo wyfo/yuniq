@@ -41,15 +41,16 @@ def run_file(data: str, extra_args: list[str] = None) -> str:
 
 class TestYuniq(unittest.TestCase):
     def check(self, data: str, expected: str, extra_args: list[str] = None) -> None:
-        """Assert both pipe and mmap outputs equal expected, with and without --fast."""
+        """Assert both pipe and mmap outputs equal expected, with --fast and --lean."""
         for run in (run_pipe, run_file):
-            for args in ([], ["--fast"]):
+            for args in ([], ["--fast"], ["--lean"]):
                 self.assertEqual(run(data, args + (extra_args or [])), expected, f"{run.__name__}{args}")
 
     def check_count(self, data: str, expected: str, extra_args: list[str] = None) -> None:
-        """Assert -c output for both pipe and mmap paths."""
+        """Assert -c output for both pipe and mmap paths, with --lean"""
         for run in (run_pipe, run_file):
-            self.assertEqual(run(data, ["-c"] + (extra_args or [])), expected, run.__name__)
+            for args in ([], ["--lean"]):
+                self.assertEqual(run(data, ["-c"] + args + (extra_args or [])), expected, run.__name__)
 
     def test_basic_dedup(self):
         self.check("foo\nbar\nfoo\nbaz\nbar\n", "foo\nbar\nbaz\n")
