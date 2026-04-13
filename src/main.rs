@@ -126,8 +126,8 @@ enum DeduplicatorSeen {
         buffers: Vec<Vec<u8>>,
     },
     // `map` stores the key (line without trailing newline) → index into `order`.
-    // `order` stores the full line (with newline) and its running count, in
-    // first-seen order, so we can emit insertion-order output without sorting.
+    // `order` stores the line (without trailing newline) and its running count,
+    // in first-seen order, so we can emit insertion-order output without sorting.
     // Both UnsafeSlices point into the owned `buffers` vecs below.
     Count {
         map: HashMap<UnsafeSlice, usize>,
@@ -182,12 +182,7 @@ impl Deduplicator {
 
     #[allow(clippy::wrong_self_convention)]
     fn is_duplicate(&mut self, line: &[u8]) -> bool {
-        let mut key = match line {
-            // Do I want to support this?
-            // [k @ .., b'\r', b'\n'] => k,
-            [k @ .., b'\n'] => k,
-            k => k,
-        };
+        let mut key = line;
         if self.has_filter {
             if let Some(n) = self.skip_fields {
                 for _ in 0..n.get() {
@@ -284,9 +279,7 @@ impl Deduplicator {
             writer.write_all(buf.format(count).as_bytes())?;
             writer.write_all(b"\t")?;
             writer.write_all(&line)?;
-            if !line.ends_with(b"\n") {
-                writer.write_all(b"\n")?;
-            }
+            writer.write_all(b"\n")?;
         }
         Ok(())
     }
@@ -303,21 +296,37 @@ fn process_chunk(
     // found, we flush [write_start..pos] (everything before the duplicate) in
     // one write, then skip the duplicate by advancing write_start past it.
     let mut write_start = 0;
-    while pos < data.len() {
-        let next = match memchr(b'\n', &data[pos..]) {
-            Some(i) => pos + i + 1,
-            None if is_final => data.len(),
+    loop {
+        let nl = match memchr(b'\n', &data[pos..]) {
+            Some(off) => pos + off,
+            // No newline found: if this is the final chunk and bytes remain,
+            // use `data.len()` as a virtual newline position. The `nl == data.len()`
+            // branches below handle both cases — a duplicate returns early, a
+            // unique line breaks out and is written without a trailing newline,
+            // preserving the original absence of one.
+            None if is_final && pos != data.len() => data.len(),
             None => break,
         };
-        // Help the compiler to remove bound checks by making invariants explicit.
-        // SAFETY: next is either pos + newline_offset + 1 (bounded by data.len())
-        // or data.len(); pos < next by construction; write_start only moves forward.
-        unsafe { assert_unchecked(next <= data.len() && pos < next && write_start <= pos) };
-        if dedup.is_duplicate(&data[pos..next]) {
+        // SAFETY: `nl` is either `pos + newline_offset` (bounded by `data.len() - 1`)
+        // or `data.len()` (virtual newline); `write_start` only moves forward to a
+        // previous `pos` value, so it never exceeds `pos`.
+        unsafe { assert_unchecked(nl <= data.len() && write_start <= pos) };
+        if dedup.is_duplicate(&data[pos..nl]) {
             writer.write_all(&data[write_start..pos])?;
-            write_start = next;
+            if nl == data.len() {
+                debug_assert!(is_final);
+                return Ok(nl);
+            }
+            write_start = nl + 1;
+        } else if nl == data.len() {
+            debug_assert!(is_final);
+            pos = nl;
+            break;
         }
-        pos = next;
+        pos = nl + 1;
+        // SAFETY: both `nl == data.len()` branches above either returned or broke,
+        // so `nl < data.len()` here, therefore `pos = nl + 1 <= data.len()`.
+        unsafe { assert_unchecked(pos <= data.len()) };
     }
     // Help the compiler to remove bound checks by making invariants explicit.
     // SAFETY: the loop only advances pos forward and breaks before data.len();
