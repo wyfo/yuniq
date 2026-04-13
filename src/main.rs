@@ -30,6 +30,12 @@ struct Args {
     /// Prefix each line with its global occurrence count
     #[arg(short = 'c', long, conflicts_with_all = ["fast", "safe"])]
     count: bool,
+    /// Sort output by count (requires --count)
+    #[arg(short = 'S', long, requires = "count")]
+    sort: bool,
+    /// Reverse sort order (requires --sort)
+    #[arg(short = 'r', long, requires = "sort")]
+    reverse: bool,
     /// Only compare the first N characters of each line
     #[arg(short = 'w', long)]
     check_chars: Option<usize>,
@@ -204,11 +210,23 @@ impl Deduplicator {
         }
     }
 
-    fn write_counts(&self, writer: &mut impl Write) -> io::Result<()> {
-        let DeduplicatorSeen::Count { order, .. } = &self.seen else {
+    fn write_counts(
+        &mut self,
+        writer: &mut impl Write,
+        sort: bool,
+        reverse: bool,
+    ) -> io::Result<()> {
+        let DeduplicatorSeen::Count { order, .. } = &mut self.seen else {
             return Ok(());
         };
-        for &(ptr, count) in order {
+        if sort {
+            if reverse {
+                order.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+            } else {
+                order.sort_by_key(|&(_, count)| count);
+            }
+        }
+        for &(ptr, count) in order.iter() {
             write!(writer, "{:>7} ", count)?;
             // SAFETY: ptr points into self.buffers which are alive for the duration of self.
             writer.write_all(unsafe { ptr.as_ref() })?;
@@ -324,7 +342,7 @@ fn deduplicate(args: Args) -> io::Result<()> {
         None => process_stream(&mut dedup, write)?,
     }
     if args.count {
-        dedup.write_counts(&mut writer)?;
+        dedup.write_counts(&mut writer, args.sort, args.reverse)?;
     }
     // Prevent mmap to be dropped before writing the counts
     drop(mmap);

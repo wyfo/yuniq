@@ -185,6 +185,19 @@ class TestYuniq(unittest.TestCase):
         # -f 1: skip first field, "foo" is the common key for ts1/ts2 lines
         self.check_count("ts1 foo\nts2 foo\nts1 bar\n", "      2 ts1 foo\n      1 ts1 bar\n", ["-f", "1"])
 
+    def test_sort_ascending(self):
+        self.check_count("a\nb\na\nc\na\nb\n", "      1 c\n      2 b\n      3 a\n", ["-S"])
+
+    def test_sort_descending(self):
+        self.check_count("a\nb\na\nc\na\nb\n", "      3 a\n      2 b\n      1 c\n", ["-S", "-r"])
+
+    def test_sort_stable_ties(self):
+        # equal counts preserve first-seen order
+        self.check_count("b\na\nb\na\n", "      2 b\n      2 a\n", ["-S"])
+
+    def test_sort_already_ordered(self):
+        self.check_count("c\nb\nb\na\na\na\n", "      1 c\n      2 b\n      3 a\n", ["-S"])
+
 
 # ---------------------------------------------------------------------------
 
