@@ -55,6 +55,7 @@ for file in "${FILES[@]}"; do
         --shell=bash \
         --export-markdown "$BENCH_RESULTS/${name}_dedup.md" \
         -n "yuniq"               "$YUNIQ                < $file > /dev/null" \
+        -n "yuniq -U"            "$YUNIQ -U              < $file > /dev/null" \
         -n "yuniq --fast"        "$YUNIQ --fast          < $file > /dev/null" \
         -n "yuniq --lean"        "$YUNIQ --lean          < $file > /dev/null" \
         -n "yuniq (pipe)"        "cat $file | $YUNIQ              > /dev/null" \
@@ -75,6 +76,7 @@ for file in "${FILES[@]}"; do
         --shell=bash \
         --export-markdown "$BENCH_RESULTS/${name}_count.md" \
         -n "yuniq -c"               "$YUNIQ -c               < $file > /dev/null" \
+        -n "yuniq -cU"              "$YUNIQ -cU              < $file > /dev/null" \
         -n "yuniq -c --lean"        "$YUNIQ -c --lean         < $file > /dev/null" \
         -n "yuniq -c (pipe)"        "cat $file | $YUNIQ -c              > /dev/null" \
         -n "hist"                   "hist                    < $file > /dev/null" \

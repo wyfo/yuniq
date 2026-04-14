@@ -206,6 +206,12 @@ class TestYuniq(unittest.TestCase):
         # -S preserves insertion order
         self.check_count("a\nb\na\nc\na\nb\n", "3\ta\n2\tb\n1\tc\n", ["-S"])
 
+    def test_unicode_normalization(self):
+        nfc = "\u0439"  # й  — U+0439 CYRILLIC SMALL LETTER SHORT I (precomposed)
+        nfd = "\u0438\u0306"  # й  — U+0438 + U+0306 COMBINING BREVE (decomposed)
+        self.check(f"{nfc}\n{nfd}\n", f"{nfc}\n{nfd}\n")
+        self.check(f"{nfc}\n{nfd}\n", f"{nfc}\n", ["-U"])
+
 
 # ---------------------------------------------------------------------------
 

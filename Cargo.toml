@@ -19,6 +19,8 @@ itoa = "1.0.18"
 libc = "0.2.184"
 memchr = "2.8.0"
 memmap2 = "0.9.10"
+unicode-normalization = "0.1.25"
+simdutf8 = "0.1.5"
 
 [profile.release]
 panic = "abort"

@@ -12,20 +12,12 @@ use memchr::{memchr, memchr2};
 use memmap2::Mmap;
 use twox_hash::xxhash3_128;
 
+use crate::unicode::normalize_unicode;
+
+mod unicode;
+
 const DEFAULT_CAPACITY: usize = 1024 * 1024;
 const READ_BUF_SIZE: usize = 64 * 1024;
-
-fn random_seed() -> u64 {
-    let mut buf = [0u8; 8];
-    getrandom_fill(&mut buf).expect("failed to generate random seed");
-    u64::from_ne_bytes(buf)
-}
-
-fn random_secret() -> Box<[u8]> {
-    let mut secret = vec![0u8; xxhash3_128::DEFAULT_SECRET_LENGTH];
-    getrandom_fill(&mut secret).expect("failed to generate random secret");
-    secret.into_boxed_slice()
-}
 
 #[derive(Parser)]
 #[command(about = "Hyperfast line deduplicator")]
@@ -64,6 +56,22 @@ struct Args {
     /// Skip the first N whitespace-delimited fields of each line before comparing
     #[arg(short = 'f', long)]
     skip_fields: Option<usize>,
+    /// Normalize Unicode to NFC before comparing lines (lines that differ only
+    /// in normalization form are treated as duplicates)
+    #[arg(short = 'U', long)]
+    normalize_unicode: bool,
+}
+
+fn random_seed() -> u64 {
+    let mut buf = [0u8; 8];
+    getrandom_fill(&mut buf).expect("failed to generate random seed");
+    u64::from_ne_bytes(buf)
+}
+
+fn random_secret() -> Box<[u8]> {
+    let mut secret = vec![0u8; xxhash3_128::DEFAULT_SECRET_LENGTH];
+    getrandom_fill(&mut secret).expect("failed to generate random secret");
+    secret.into_boxed_slice()
 }
 
 // Read from stdin into the spare capacity of `buf`, set_len, and return the byte count.
@@ -119,9 +127,18 @@ impl Hash for LineKey<'_> {
 struct Arena {
     bump: Bump,
     lean: bool,
+    normalize_unicode: bool,
 }
 
 impl Arena {
+    fn new(lean: bool, normalize_unicode: bool) -> Self {
+        Self {
+            bump: Bump::new(),
+            lean,
+            normalize_unicode,
+        }
+    }
+
     fn new_buf(&self) -> BVec<'_, u8> {
         BVec::with_capacity_in(READ_BUF_SIZE, &self.bump)
     }
@@ -136,12 +153,17 @@ impl Arena {
     /// exists. Concretely, `data` must be a subslice of either:
     ///   • a bumpalo-Vec buffer allocated from this arena (process_stream), or
     ///   • a mmap that outlives `'arena` (process_mmap).
-    unsafe fn alloc_line<'s>(&'s self, data: &[u8]) -> &'s [u8] {
+    unsafe fn alloc_line<'arena>(&'arena self, data: &[u8]) -> &'arena [u8] {
+        if self.normalize_unicode
+            && let Some(normalized) = normalize_unicode(data, &self.bump)
+        {
+            return normalized;
+        }
         if self.lean {
             self.bump.alloc_slice_copy(data)
         } else {
             // SAFETY: upheld by caller per contract above.
-            unsafe { std::mem::transmute::<&[u8], &'s [u8]>(data) }
+            unsafe { std::mem::transmute::<&[u8], &'arena [u8]>(data) }
         }
     }
 
@@ -150,7 +172,11 @@ impl Arena {
     /// dealloc can roll back the bump pointer if called on the last allocation,
     /// corrupting live LineKey references); in lean mode the processed prefix is
     /// drained in place. When `processed == buf.len()` the returned buffer is empty.
-    fn reset_buf<'b>(&'b self, mut buf: BVec<'b, u8>, processed: usize) -> BVec<'b, u8> {
+    fn reset_buf<'arena>(
+        &'arena self,
+        mut buf: BVec<'arena, u8>,
+        processed: usize,
+    ) -> BVec<'arena, u8> {
         if self.lean {
             if processed == buf.len() {
                 buf.clear();
@@ -435,10 +461,7 @@ fn deduplicate(args: Args) -> io::Result<()> {
     // Drop order (reverse): dedup → mmap → arena.
     // This guarantees that LineKey references into mmap memory (non-lean, mmap path)
     // remain valid for the entire lifetime of `dedup`.
-    let arena = Arena {
-        bump: Bump::new(),
-        lean: args.lean,
-    };
+    let arena = Arena::new(args.lean, args.normalize_unicode);
     // SAFETY: we do not mutate the mapped file while the mapping is live.
     let mmap = (!args.lean)
         .then(|| unsafe { Mmap::map(&io::stdin().lock()).ok() })
