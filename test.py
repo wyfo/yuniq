@@ -212,6 +212,9 @@ class TestYuniq(unittest.TestCase):
         self.check(f"{nfc}\n{nfd}\n", f"{nfc}\n{nfd}\n")
         self.check(f"{nfc}\n{nfd}\n", f"{nfc}\n", ["-U"])
 
+    def test_invalid_utf8(self):
+        self.check(f"\x80\n\x80\n", f"\x80\n", ["-U"])
+
 
 # ---------------------------------------------------------------------------
 
